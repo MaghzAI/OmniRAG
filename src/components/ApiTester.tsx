@@ -1,5 +1,6 @@
 'use client';
 
+import { fetchWithAuth } from "@/lib/auth/fetchWithAuth";
 import { useState } from 'react';
 import { Terminal, Play, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 
@@ -10,7 +11,7 @@ export default function ApiTester() {
   const testApi = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/health');
+      const res = await fetchWithAuth('/api/health');
       const data = await res.json();
       setResponse(JSON.stringify(data, null, 2));
     } catch {

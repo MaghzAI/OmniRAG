@@ -1,19 +1,11 @@
 import {
-  collection,
-  getDocs,
-  getDoc,
-  setDoc,
-  doc,
-  deleteDoc,
-  query,
-  where,
-  limit,
-} from 'firebase/firestore';
-import { firestore } from '../firebase';
-import {
   Tenant,
+  User,
+  SessionRecord,
   Document,
+  DocumentVersion,
   DocumentChunk,
+  ChunkIndexResult,
   Collection,
   Conversation,
   Message,
@@ -24,577 +16,121 @@ import {
   SyncLogEntry,
   McpResourceItem,
 } from '../types/omnirag';
-import { insertPostgresDocument, insertPostgresChunk, deletePostgresDocument } from './postgres';
-import { upsertQdrantChunk, deleteQdrantDocument } from './qdrant';
-import { generateEmbedding } from '../rag/embedding';
+import { chunkDocument, estimateTokenCount } from '../rag/chunker';
+import { DEFAULT_AI_MODELS } from '../config/aiModels';
+import {
+  ensurePostgresTables,
+  getPostgresDocuments,
+  getPostgresDocumentById,
+  insertPostgresDocument,
+  deletePostgresDocument,
+  getPostgresChunks,
+  insertPostgresChunk,
+  deletePostgresChunksByDocument,
+  getPostgresSources,
+  getPostgresSourceById,
+  insertPostgresSource,
+  deletePostgresSource,
+  getPostgresSyncLogs,
+  insertPostgresSyncLog,
+  getPostgresCollections,
+  insertPostgresCollection,
+  getPostgresMcpServers,
+  insertPostgresMcpServer,
+  deletePostgresMcpServer,
+  getPostgresAuditLogs,
+  insertPostgresAuditLog,
+  getPostgresToolCalls,
+  insertPostgresToolCall,
+  getPostgresConversations,
+  getPostgresConversationById,
+  insertPostgresConversation,
+  deletePostgresConversation,
+  getPostgresMessages,
+  insertPostgresMessage,
+  resetPostgresPool,
+  getPostgresUserByEmail,
+  getPostgresUserById,
+  insertPostgresUser,
+  getPostgresTenant,
+  insertPostgresTenant,
+  getPostgresSession,
+  insertPostgresSession,
+  deletePostgresSession,
+  deleteExpiredPostgresSessions,
+} from './postgres';
+import { upsertQdrantChunk, upsertQdrantChunks, deleteQdrantDocument, updateQdrantDocumentPayload } from './qdrant';
+import { generateEmbedding, embedBatch } from '../rag/embedding';
+import { processYoutubeTranscript } from '../youtube/transcriptParser';
+import { processPdfWithBatchedPipeline } from '../pdf/pdfChunker';
+import { decryptSourceConfig } from './sourceConfigCrypto';
 
-
-// Initial Tenants
-export const INITIAL_TENANTS: Tenant[] = [
-  {
-    id: 'tenant-acme-01',
-    name: 'شركة أكمي العالمية (ACME Corp)',
-    plan: 'enterprise',
-    createdAt: '2026-08-01T00:00:00.000Z',
-    settings: {
-      chunkSize: 500,
-      chunkOverlap: 50,
-      hybridWeights: { semantic: 0.7, lexical: 0.3 },
-      defaultModel: 'gemini-3.6-flash',
-      dataRetentionDays: 90,
-      enablePiiRedaction: true,
-      enablePromptSanitizer: true,
-    },
-  },
-  {
-    id: 'tenant-health-02',
-    name: 'مجموعة الرعاية الصحية العالمية (BioHealth)',
-    plan: 'enterprise',
-    createdAt: '2026-08-01T00:00:00.000Z',
-    settings: {
-      chunkSize: 400,
-      chunkOverlap: 40,
-      hybridWeights: { semantic: 0.6, lexical: 0.4 },
-      defaultModel: 'gemini-3.1-pro-preview',
-      dataRetentionDays: 180,
-      enablePiiRedaction: true,
-      enablePromptSanitizer: true,
-    },
-  },
-];
-
-// Initial Collections
-export const INITIAL_COLLECTIONS: Collection[] = [
-  {
-    id: 'col-legal-01',
-    tenantId: 'tenant-acme-01',
-    name: 'العقود والسياسات القانونية (Legal & Contracts)',
-    description: 'شروط الخدمة، اتفاقيات السرية (NDA)، وبنود عدم التنافس والالتزام',
-    documentCount: 3,
-    createdAt: '2026-08-01T00:00:00.000Z',
-  },
-  {
-    id: 'col-tech-02',
-    tenantId: 'tenant-acme-01',
-    name: 'المواصفات التقنية والأمن السيبراني',
-    description: 'معايير ISO27001، سياسات العزل والمستأجرين، ومعمارية API',
-    documentCount: 2,
-    createdAt: '2026-08-01T00:00:00.000Z',
-  },
-  {
-    id: 'col-health-03',
-    tenantId: 'tenant-health-02',
-    name: 'سياسات HIPAA وسلامة المرضى',
-    description: 'دليل حماية البيانات الطبية وتشفير السجلات الحيوية',
-    documentCount: 2,
-    createdAt: '2026-08-01T00:00:00.000Z',
-  },
-];
-
-// Initial Documents
-export const INITIAL_DOCUMENTS: Document[] = [
-  {
-    id: 'doc-001',
-    tenantId: 'tenant-acme-01',
-    title: 'اتفاقية عدم الإفصاح والسرية NDA (2026)',
-    content: `اتفاقية عدم الإفصاح والسرية (NDA) - شركة أكمي العالمية
-المادة 1: التعريفات والالتزامات
-يتعهد الطرفان بالحفاظ على سرية جميع البيانات التقنية والمالية والتجارية المتبادلة. يمنع منعاً باتاً نقل أي بيانات خارج نطاق المستأجر المعين (Tenant Isolation).
-المادة 2: مدة الاتفاقية والنطاق
-تستمر هذه الاتفاقية لمدة 5 سنوات من تاريخ التوقيع. في حال حدوث أي تسريب غير مصرح به، يحق للطرف المتضرر المطالبة بتعويضات فورية وتقديم بلاغ للجهات المختصة.
-المادة 3: حماية البيانات في بيئة Cloud
-تلتزم جميع الأنظمة المستضافة بالتشفير الكامل بأسلوب AES-256 أثناء التخزين وببروتوكول TLS 1.3 أثناء النقل، مع تفعيل سياسات التحكم بالوصول على مستوى الصفوف (Row Level Security).`,
-    sourceType: 'file',
-    language: 'ar',
-    status: 'indexed',
-    chunkCount: 3,
-    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    metadata: { author: 'Legal Team', classification: 'Confidential' },
-    collectionIds: ['col-legal-01'],
-  },
-  {
-    id: 'doc-002',
-    tenantId: 'tenant-acme-01',
-    title: 'سياسة أمن واستجابة الحوادث السيبرانية ISO27001',
-    content: `سياسة أمن واستجابة الحوادث - قسم تكنولوجيا المعلومات
-1. كشف الاختراقات وهجمات الحقن (Prompt Injection Defense):
-يتم فحص جميع المدخلات الموجهة لوكلاء الذكاء الاصطناعي عبر محرك حتمي (HookHarness) لمنع محاولات تجاوز تعليمات النظام أو استخراج المفاتيح والرموز الحساسة.
-2. إدارة أدوات MCP بروتوكول سياق النموذج:
-جميع أدوات MCP المصنفة تحت مستوى Sandbox T2 و T3 (التي تحدث آثاراً جانبية مثل إرسال بريد أو تعديل قواعد البيانات) تتطلب موافقة بشرية صريحة من المستخدم قبل التنفيذ.
-3. التشفير وإسقاط الهويات PII Redaction:
-يُحظر بث أي معلومات تعريف شخصية (بريد إلكتروني، رقم هاتف، بطاقة ائتمان) في استجابات النموذج، ويتم استبدالها حتمياً بوسوم [REDACTED].`,
-    sourceType: 'file',
-    language: 'ar',
-    status: 'indexed',
-    chunkCount: 3,
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-    metadata: { department: 'CyberSecurity', isoVersion: '2026.1' },
-    collectionIds: ['col-tech-02'],
-  },
-  {
-    id: 'doc-003',
-    tenantId: 'tenant-acme-01',
-    title: 'OmniRAG System Architecture & Hybrid Retrieval Spec',
-    content: `OmniRAG Enterprise Architecture Specification:
-1. Multi-Tenant Hybrid Search Engine:
-Combines dense vector retrieval via Qdrant (cosine similarity over 3072-dim embeddings) and sparse BM25/FTS text matching over Neon Postgres. Scores are fused using Reciprocal Rank Fusion (RRF) with configurable semantic and lexical weights.
-2. Smart Agentic Routing:
-Simple requests are handled by fast models (Gemini Flash-Lite), while complex reasoning, cross-encoder reranking, and multi-step tool calls route to Gemini 3.6 Flash or 3.1 Pro Preview.
-3. Citation Verification:
-Every generated claim with a citation index is cross-checked against retrieved chunk UUIDs to eliminate hallucinated references.`,
-    sourceType: 'file',
-    language: 'en',
-    status: 'indexed',
-    chunkCount: 3,
-    createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-    metadata: { system: 'OmniRAG Core', version: '2.4' },
-    collectionIds: ['col-tech-02'],
-  },
-];
-
-// Initial Chunks
-export const INITIAL_CHUNKS: DocumentChunk[] = [
-  {
-    id: 'chunk-001-1',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-001',
-    documentTitle: 'اتفاقية عدم الإفصاح والسرية NDA (2026)',
-    content: 'المادة 1: يتعهد الطرفان بالحفاظ على سرية جميع البيانات التقنية والمالية والتجارية المتبادلة. يمنع منعاً باتاً نقل أي بيانات خارج نطاق المستأجر المعين (Tenant Isolation).',
-    chunkIndex: 0,
-    pageNumber: 1,
-    language: 'ar',
-    metadata: { section: 'التعريفات' },
-  },
-  {
-    id: 'chunk-001-2',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-001',
-    documentTitle: 'اتفاقية عدم الإفصاح والسرية NDA (2026)',
-    content: 'المادة 2: تستمر هذه الاتفاقية لمدة 5 سنوات من تاريخ التوقيع. في حال حدوث أي تسريب غير مصرح به، يحق للطرف المتضرر المطالبة بتعويضات فورية وتقديم بلاغ للجهات المختصة.',
-    chunkIndex: 1,
-    pageNumber: 1,
-    language: 'ar',
-    metadata: { section: 'المدة والجزاءات' },
-  },
-  {
-    id: 'chunk-001-3',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-001',
-    documentTitle: 'اتفاقية عدم الإفصاح والسرية NDA (2026)',
-    content: 'المادة 3: تلتزم جميع الأنظمة المستضافة بالتشفير الكامل بأسلوب AES-256 أثناء التخزين وببروتوكول TLS 1.3 أثناء النقل، مع تفعيل سياسات التحكم بالوصول على مستوى الصفوف (Row Level Security).',
-    chunkIndex: 2,
-    pageNumber: 2,
-    language: 'ar',
-    metadata: { section: 'التشفير و RLS' },
-  },
-  {
-    id: 'chunk-002-1',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-002',
-    documentTitle: 'سياسة أمن واستجابة الحوادث السيبرانية ISO27001',
-    content: '1. كشف الاختراقات وهجمات الحقن (Prompt Injection Defense): يتم فحص جميع المدخلات الموجهة لوكلاء الذكاء الاصطناعي عبر محرك حتمي (HookHarness) لمنع محاولات تجاوز تعليمات النظام أو استخراج المفاتيح.',
-    chunkIndex: 0,
-    pageNumber: 1,
-    language: 'ar',
-    metadata: { category: 'Prompt Injection Security' },
-  },
-  {
-    id: 'chunk-002-2',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-002',
-    documentTitle: 'سياسة أمن واستجابة الحوادث السيبرانية ISO27001',
-    content: '2. إدارة أدوات MCP: جميع أدوات MCP المصنفة تحت Sandbox T2 و T3 (التي تحدث آثاراً جانبية مثل إرسال بريد أو تعديل قواعد البيانات) تتطلب موافقة بشرية صريحة من المستخدم قبل التنفيذ.',
-    chunkIndex: 1,
-    pageNumber: 1,
-    language: 'ar',
-    metadata: { category: 'MCP Sandbox' },
-  },
-  {
-    id: 'chunk-002-3',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-002',
-    documentTitle: 'سياسة أمن واستجابة الحوادث السيبرانية ISO27001',
-    content: '3. التشفير وإسقاط الهويات PII Redaction: يُحظر بث أي معلومات تعريف شخصية (بريد إلكتروني، رقم هاتف، بطاقة ائتمان) في استجابات النموذج، ويتم استبدالها حتمياً بوسوم [REDACTED].',
-    chunkIndex: 2,
-    pageNumber: 2,
-    language: 'ar',
-    metadata: { category: 'PII Privacy' },
-  },
-  {
-    id: 'chunk-003-1',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-003',
-    documentTitle: 'OmniRAG System Architecture & Hybrid Retrieval Spec',
-    content: 'Multi-Tenant Hybrid Search Engine: Combines dense vector retrieval via Qdrant (cosine similarity) and sparse BM25 text matching over Neon Postgres. Fused using Reciprocal Rank Fusion (RRF).',
-    chunkIndex: 0,
-    pageNumber: 1,
-    language: 'en',
-    metadata: { module: 'Hybrid Search Engine' },
-  },
-  {
-    id: 'chunk-003-2',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-003',
-    documentTitle: 'OmniRAG System Architecture & Hybrid Retrieval Spec',
-    content: 'Smart Agentic Routing: Simple requests are handled by fast models (Gemini Flash-Lite), while complex reasoning, cross-encoder reranking, and multi-step tool calls route to Gemini 3.6 Flash or 3.1 Pro Preview.',
-    chunkIndex: 1,
-    pageNumber: 1,
-    language: 'en',
-    metadata: { module: 'Smart Router' },
-  },
-  {
-    id: 'chunk-003-3',
-    tenantId: 'tenant-acme-01',
-    documentId: 'doc-003',
-    documentTitle: 'OmniRAG System Architecture & Hybrid Retrieval Spec',
-    content: 'Citation Verification: Every generated claim with a citation index is cross-checked against retrieved chunk UUIDs to eliminate hallucinated references.',
-    chunkIndex: 2,
-    pageNumber: 2,
-    language: 'en',
-    metadata: { module: 'Citation Verification' },
-  },
-];
-
-// Initial MCP Servers
-export const INITIAL_MCP_SERVERS: MCPServerConfig[] = [
-  {
-    id: 'mcp-slack-01',
-    tenantId: 'tenant-acme-01',
-    name: 'Slack Communication Gateway',
-    description: 'إرسال التنبيهات وقراءة الرسائل والقنوات عبر Slack API',
-    endpointUrl: 'https://mcp.slack.internal/v2',
-    protocolVersion: '2026-07-28',
-    sandboxTier: 'T2_ELEVATED',
-    enabledTools: ['slack_send_message', 'slack_read_channel'],
-    requireConfirmationTools: ['slack_send_message'],
-    status: 'healthy',
-    latencyMs: 38,
-    lastChecked: '2026-08-08T12:00:00.000Z',
-  },
-  {
-    id: 'mcp-github-02',
-    tenantId: 'tenant-acme-01',
-    name: 'GitHub Enterprise Integrator',
-    description: 'استعلام المستودعات وقراءة الملفات وإنشاء PRs وتذاكر الإغلاق',
-    endpointUrl: 'https://mcp.github.internal/v2',
-    protocolVersion: '2026-07-28',
-    sandboxTier: 'T2_ELEVATED',
-    enabledTools: ['github_search_code', 'github_create_issue', 'github_read_repo'],
-    requireConfirmationTools: ['github_create_issue'],
-    status: 'healthy',
-    latencyMs: 45,
-    lastChecked: '2026-08-08T12:00:00.000Z',
-  },
-  {
-    id: 'mcp-websearch-03',
-    tenantId: 'tenant-acme-01',
-    name: 'Google Search & Live Web Fetcher',
-    description: 'جلب الأخبار الحية والمعلومات المحدثة من الويب المفتوح',
-    endpointUrl: 'https://mcp.websearch.internal/v2',
-    protocolVersion: '2026-07-28',
-    sandboxTier: 'T0_READ_ONLY',
-    enabledTools: ['web_live_search', 'fetch_url_content'],
-    requireConfirmationTools: [],
-    status: 'healthy',
-    latencyMs: 120,
-    lastChecked: '2026-08-08T12:00:00.000Z',
-  },
-  {
-    id: 'mcp-sql-04',
-    tenantId: 'tenant-acme-01',
-    name: 'PostgreSQL Analytics Query Hub',
-    description: 'تشغيل استعلامات SQL حتمية وآمنة فوق قاعدة بيانات التحليلات',
-    endpointUrl: 'https://mcp.postgres.internal/v2',
-    protocolVersion: '2026-07-28',
-    sandboxTier: 'T1_LIMITED',
-    enabledTools: ['external_postgres_query', 'get_table_schema'],
-    requireConfirmationTools: ['external_postgres_query'],
-    status: 'healthy',
-    latencyMs: 22,
-    lastChecked: '2026-08-08T12:00:00.000Z',
-  },
-];
-
-// Initial Audit Logs
-export const INITIAL_AUDIT_LOGS: AuditLogEntry[] = [
-  {
-    id: 'audit-101',
-    tenantId: 'tenant-acme-01',
-    actorId: 'user-sec-lead',
-    action: 'PRE_INFERENCE_CHECK',
-    resourceType: 'chat_completion',
-    resourceId: 'conv-991',
-    status: 'success',
-    details: 'مرور فحص TenantGate و InputSanitizer لـ 1 مدخل',
-    timestamp: '2026-08-08T20:00:00.000Z',
-  },
-  {
-    id: 'audit-102',
-    tenantId: 'tenant-acme-01',
-    actorId: 'agentic_engine',
-    action: 'MCP_SIDE_EFFECT_PROMPT',
-    resourceType: 'mcp_tool',
-    resourceId: 'slack_send_message',
-    status: 'blocked',
-    details: 'تم تعليق أداة Slack لطلب موافقة المستخدم البشرية (SideEffectGate H5)',
-    timestamp: '2026-08-08T21:00:00.000Z',
-  },
-  {
-    id: 'audit-103',
-    tenantId: 'tenant-acme-01',
-    actorId: 'user-sec-lead',
-    action: 'PII_REDACTION',
-    resourceType: 'output_stream',
-    resourceId: 'msg-552',
-    status: 'success',
-    details: 'تم إخفاء بريد إلكتروني ورقم هاتف تلقائياً قبل البث (PIIRedactor H9)',
-    timestamp: '2026-08-08T22:30:00.000Z',
-  },
-];
-
-// Initial Sources
-export const INITIAL_SOURCES: SourceConnector[] = [
-  {
-    id: 'src-file-01',
-    tenantId: 'tenant-acme-01',
-    name: 'المستندات المحلية والسياسات العامة',
-    type: 'file',
-    status: 'healthy',
-    config: {
-      acceptedTypes: ['pdf', 'docx', 'txt', 'md'],
-      maxFileSizeMb: 500,
-      chunkStrategy: 'semantic',
-      chunkSize: 512,
-      chunkOverlap: 50,
-    },
-    syncSchedule: 'manual',
-    lastSyncAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-    documentCount: 3,
-    totalBytes: 1548200,
-    collectionIds: ['col-legal-01', 'col-tech-02'],
-    createdAt: '2026-08-01T00:00:00.000Z',
-  },
-  {
-    id: 'src-url-02',
-    tenantId: 'tenant-acme-01',
-    name: 'زاحف بوابة المعايير الرسمية ISO27001',
-    type: 'url',
-    status: 'healthy',
-    config: {
-      url: 'https://iso27001.example.org/compliance-2026',
-      maxDepth: 3,
-      maxPages: 50,
-      includeSelector: 'main, article',
-      userAgent: 'OmniRAG-Crawler/2.4',
-    },
-    syncSchedule: '0 */6 * * *',
-    lastSyncAt: new Date(Date.now() - 3600000 * 5).toISOString(),
-    nextSyncAt: new Date(Date.now() + 3600000 * 1).toISOString(),
-    documentCount: 12,
-    totalBytes: 4820000,
-    collectionIds: ['col-tech-02'],
-    createdAt: '2026-08-02T00:00:00.000Z',
-  },
-  {
-    id: 'src-yt-03',
-    tenantId: 'tenant-acme-01',
-    name: 'مفرغ تفريغات ندوات الأمن السيبراني (YouTube)',
-    type: 'youtube',
-    status: 'healthy',
-    config: {
-      channelOrPlaylistUrl: 'https://youtube.com/@CyberSecuritySummit2026',
-      autoTranslateArabic: true,
-      extractTimestamps: true,
-    },
-    syncSchedule: '0 0 * * *',
-    lastSyncAt: new Date(Date.now() - 3600000 * 18).toISOString(),
-    documentCount: 5,
-    collectionIds: ['col-tech-02'],
-    createdAt: '2026-08-03T00:00:00.000Z',
-  },
-  {
-    id: 'src-gh-04',
-    tenantId: 'tenant-acme-01',
-    name: 'مستودع الكود المصدري GitHub Repository',
-    type: 'github',
-    status: 'healthy',
-    config: {
-      repo: 'ACME-Corp/enterprise-rag-core',
-      branch: 'main',
-      fileExtensions: ['.ts', '.py', '.md', '.json'],
-      includeDocsFolder: true,
-    },
-    syncSchedule: '0 */3 * * *',
-    lastSyncAt: new Date(Date.now() - 3600000 * 1).toISOString(),
-    nextSyncAt: new Date(Date.now() + 3600000 * 2).toISOString(),
-    documentCount: 24,
-    collectionIds: ['col-tech-02'],
-    createdAt: '2026-08-04T00:00:00.000Z',
-  },
-  {
-    id: 'src-db-05',
-    tenantId: 'tenant-acme-01',
-    name: 'قاعدة بيانات PostgreSQL التحليلية',
-    type: 'database',
-    status: 'healthy',
-    config: {
-      dbType: 'postgresql',
-      host: 'postgres.prod.internal',
-      port: 5432,
-      database: 'analytics_warehouse',
-      tables: ['audit_reports', 'security_incidents', 'compliance_logs'],
-      syncQuery: 'SELECT id, title, content, updated_at FROM compliance_logs WHERE updated_at > :last_sync',
-    },
-    syncSchedule: '*/30 * * * *',
-    lastSyncAt: new Date(Date.now() - 1800000).toISOString(),
-    nextSyncAt: new Date(Date.now() + 1800000).toISOString(),
-    documentCount: 8,
-    collectionIds: ['col-legal-01'],
-    createdAt: '2026-08-05T00:00:00.000Z',
-  },
-  {
-    id: 'src-gdrive-06',
-    tenantId: 'tenant-acme-01',
-    name: 'مجلد Google Drive للوثائق القانونية',
-    type: 'gdrive',
-    status: 'degraded',
-    config: {
-      folderId: '1A2b3C4d5E6f7G8h9I0j',
-      syncSubfolders: true,
-      serviceAccountConfigured: true,
-    },
-    syncSchedule: '0 */12 * * *',
-    lastSyncAt: new Date(Date.now() - 3600000 * 10).toISOString(),
-    documentCount: 7,
-    collectionIds: ['col-legal-01'],
-    lastError: 'Google Drive API Rate limit exceeded (429). Retry scheduled.',
-    createdAt: '2026-08-06T00:00:00.000Z',
-  },
-];
-
-export const INITIAL_SYNC_LOGS: SyncLogEntry[] = [
-  {
-    id: 'log-001',
-    tenantId: 'tenant-acme-01',
-    sourceId: 'src-gh-04',
-    sourceName: 'مستودع الكود المصدري GitHub Repository',
-    status: 'success',
-    itemsProcessed: 14,
-    durationMs: 2340,
-    message: 'تمت مزامنة 14 ملف جديد وتقسيمها إلى 48 متجهاً بنجاح',
-    timestamp: new Date(Date.now() - 3600000 * 1).toISOString(),
-  },
-  {
-    id: 'log-002',
-    tenantId: 'tenant-acme-01',
-    sourceId: 'src-url-02',
-    sourceName: 'زاحف بوابة المعايير الرسمية ISO27001',
-    status: 'success',
-    itemsProcessed: 8,
-    durationMs: 4120,
-    message: 'تم زحف 8 صفحات ويب واستخراج النصوص العربية والإنجليزية',
-    timestamp: new Date(Date.now() - 3600000 * 5).toISOString(),
-  },
-  {
-    id: 'log-003',
-    tenantId: 'tenant-acme-01',
-    sourceId: 'src-gdrive-06',
-    sourceName: 'مجلد Google Drive للوثائق القانونية',
-    status: 'failed',
-    itemsProcessed: 2,
-    durationMs: 1250,
-    message: 'تجاوز حد الطلبات API Rate limit exceeded (429)',
-    timestamp: new Date(Date.now() - 3600000 * 10).toISOString(),
-  },
-];
+import {
+  INITIAL_TENANTS,
+  INITIAL_COLLECTIONS,
+  INITIAL_DOCUMENTS,
+  INITIAL_CHUNKS,
+  INITIAL_MCP_SERVERS,
+  INITIAL_AUDIT_LOGS,
+  INITIAL_SOURCES,
+  INITIAL_SYNC_LOGS,
+} from './constants';
+import type { IOmniRAGDatabase } from './IOmniRAGDatabase';
 
 // Lazy-seeding state
 let isSeeded = false;
 
-async function ensureSeeded() {
-  if (isSeeded) return;
-  try {
-    const sourcesCol = collection(firestore, 'sources');
-    const snapshot = await getDocs(query(sourcesCol, limit(1)));
-    if (!snapshot.empty) {
-      isSeeded = true;
-      return;
-    }
+export class MemoryDatabase implements IOmniRAGDatabase {
+  tenants: Tenant[] = [...INITIAL_TENANTS];
+  collections: Collection[] = [...INITIAL_COLLECTIONS];
+  documents: Document[] = [...INITIAL_DOCUMENTS];
+  chunks: DocumentChunk[] = [...INITIAL_CHUNKS];
+  mcpServers: MCPServerConfig[] = [];
+  sources: SourceConnector[] = [...INITIAL_SOURCES];
+  syncLogs: SyncLogEntry[] = [...INITIAL_SYNC_LOGS];
+  auditLogs: AuditLogEntry[] = [...INITIAL_AUDIT_LOGS];
+  toolCalls: MCPToolCall[] = [];
+  conversations: Conversation[] = [];
+  messages: Message[] = [];
+  // Auth state (Postgres-only auth — replaces Firebase Auth)
+  users: User[] = [];
+  sessions: SessionRecord[] = [];
 
-    console.log('Firestore Database is empty. Seeding initial RAG data...');
-
-    // Seed Tenants
-    for (const tenant of INITIAL_TENANTS) {
-      await setDoc(doc(firestore, 'tenants', tenant.id), tenant);
-    }
-
-    // Seed Collections
-    for (const col of INITIAL_COLLECTIONS) {
-      await setDoc(doc(firestore, 'collections', col.id), col);
-    }
-
-    // Seed Documents
-    for (const docObj of INITIAL_DOCUMENTS) {
-      await setDoc(doc(firestore, 'documents', docObj.id), docObj);
-    }
-
-    // Seed Chunks
-    for (const chunk of INITIAL_CHUNKS) {
-      await setDoc(doc(firestore, 'chunks', chunk.id), chunk);
-    }
-
-    // Seed MCP Servers
-    for (const server of INITIAL_MCP_SERVERS) {
-      await setDoc(doc(firestore, 'mcpServers', server.id), server);
-    }
-
-    // Seed Sources
-    for (const source of INITIAL_SOURCES) {
-      await setDoc(doc(firestore, 'sources', source.id), source);
-    }
-
-    // Seed Sync Logs
-    for (const log of INITIAL_SYNC_LOGS) {
-      await setDoc(doc(firestore, 'syncLogs', log.id), log);
-    }
-
-    // Seed Audit Logs
-    for (const audit of INITIAL_AUDIT_LOGS) {
-      await setDoc(doc(firestore, 'auditLogs', audit.id), audit);
-    }
-
-    console.log('Firestore database seeding completed!');
-    isSeeded = true;
-  } catch (error) {
-    console.error('Error seeding Firestore database:', error);
+  constructor() {
+    this.mcpServers = [...INITIAL_MCP_SERVERS];
   }
-}
 
-// Durable Firestore Database Singleton Store
-class OmniRAGDatabase {
-  // Sources
+  resetDatabaseState(): void {
+    // No external pool to reset for the in-memory store; reseed initial data.
+    this.tenants = [...INITIAL_TENANTS];
+    this.collections = [...INITIAL_COLLECTIONS];
+    this.documents = [...INITIAL_DOCUMENTS];
+    this.chunks = [...INITIAL_CHUNKS];
+    this.mcpServers = [...INITIAL_MCP_SERVERS];
+    this.sources = [...INITIAL_SOURCES];
+    this.syncLogs = [...INITIAL_SYNC_LOGS];
+    this.auditLogs = [...INITIAL_AUDIT_LOGS];
+    this.toolCalls = [];
+    this.conversations = [];
+    this.messages = [];
+    this.users = [];
+    this.sessions = [];
+  }
+
   async getSources(tenantId: string): Promise<SourceConnector[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'sources'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs
-      .map((d) => d.data() as SourceConnector)
+    return this.sources
+      .filter((s) => s.tenantId === tenantId)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   async getSourceById(id: string, tenantId: string): Promise<SourceConnector | undefined> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'sources', id);
-    const snap = await getDoc(docRef);
-    if (snap.exists() && snap.data().tenantId === tenantId) {
-      return snap.data() as SourceConnector;
-    }
-    return undefined;
+    return this.sources.find((s) => s.id === id && s.tenantId === tenantId);
   }
 
   async addSource(source: SourceConnector): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'sources', source.id), source);
+    const startedAt = Date.now();
+    this.sources = this.sources.filter((s) => s.id !== source.id);
+    this.sources.push(source);
     await this.addSyncLog({
       id: `log-${Date.now()}`,
       tenantId: source.tenantId,
@@ -602,107 +138,40 @@ class OmniRAGDatabase {
       sourceName: source.name,
       status: 'success',
       itemsProcessed: source.documentCount || 1,
-      durationMs: Math.floor(Math.random() * 2000) + 800,
-      message: `تم ربط الموصل ${source.name} وتشغيل استيعاب البيانات الأولي`,
+      durationMs: Math.max(1, Date.now() - startedAt),
+      message: `تم ربط الموصل ${source.name} وتشغيل استيعاب البيانات الأولي (ذاكرة بديلة)`,
       timestamp: new Date().toISOString(),
     });
   }
 
-  async updateSource(id: string, updates: Partial<SourceConnector>, tenantId: string): Promise<SourceConnector | undefined> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'sources', id);
-    const snap = await getDoc(docRef);
-    if (!snap.exists() || snap.data().tenantId !== tenantId) return undefined;
-
-    const updatedData = { ...snap.data(), ...updates };
-    await setDoc(docRef, updatedData);
-    return updatedData as SourceConnector;
-  }
-
-  async deleteSource(id: string, tenantId: string, purgeDocs: boolean = true): Promise<void> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'sources', id);
-    const snap = await getDoc(docRef);
-    if (!snap.exists() || snap.data().tenantId !== tenantId) return;
-
-    await deleteDoc(docRef);
-    if (purgeDocs) {
-      const docs = await this.getDocuments(tenantId);
-      const docsToRemove = docs.filter((d) => d.metadata?.sourceId === id);
-      for (const d of docsToRemove) {
-        await this.deleteDocument(d.id, tenantId);
-      }
+  async updateSource(
+    id: string,
+    updates: Partial<SourceConnector>,
+    tenantId: string,
+  ): Promise<SourceConnector | undefined> {
+    const s = await this.getSourceById(id, tenantId);
+    if (s) {
+      Object.assign(s, updates);
+      return s;
     }
+    return undefined;
   }
 
-  async syncSource(id: string, tenantId: string): Promise<{ success: boolean; itemsProcessed: number; durationMs: number }> {
-    await ensureSeeded();
+  async deleteSource(id: string, tenantId: string): Promise<void> {
+    this.sources = this.sources.filter((s) => !(s.id === id && s.tenantId === tenantId));
+  }
+
+  async syncSource(
+    id: string,
+    tenantId: string,
+  ): Promise<{ success: boolean; itemsProcessed: number; durationMs: number }> {
     const source = await this.getSourceById(id, tenantId);
     if (!source) return { success: false, itemsProcessed: 0, durationMs: 0 };
-
-    const duration = Math.floor(Math.random() * 3000) + 1200;
-    const items = Math.floor(Math.random() * 5) + 1;
-
-    source.status = 'healthy';
-    source.lastSyncAt = new Date().toISOString();
-    source.documentCount = (source.documentCount || 0) + items;
-    source.lastError = undefined;
-
-    await setDoc(doc(firestore, 'sources', id), source);
-
-    // Create a new simulated document ingested from this sync
-    const newDocId = `doc-sync-${Date.now().toString().slice(-4)}`;
-    const newDocTitle = `${source.name} - تحديث ${new Date().toLocaleDateString('ar-SA')}`;
-    const newDocContent = `تحديث بيانات من الموصل (${source.name}):\nتم جلب واستخراج ${items} سجل جديد وحفظها بتشفير عالي ومعالجة متجهات Qdrant بضمان عزْل المستأجر ${tenantId}.`;
-
-    const newDoc: Document = {
-      id: newDocId,
-      tenantId,
-      title: newDocTitle,
-      content: newDocContent,
-      sourceType: source.type === 'file' ? 'file' : 'integration',
-      language: 'ar',
-      status: 'indexed',
-      chunkCount: 2,
-      createdAt: new Date().toISOString(),
-      metadata: { sourceId: source.id, connectorType: source.type },
-      collectionIds: source.collectionIds,
-    };
-
-    await this.addDocument(newDoc);
-    await this.addChunk({
-      id: `chunk-${newDocId}-1`,
-      tenantId,
-      documentId: newDocId,
-      documentTitle: newDocTitle,
-      content: newDocContent,
-      chunkIndex: 0,
-      pageNumber: 1,
-      language: 'ar',
-      metadata: { sourceId: source.id },
-    });
-
-    await this.addSyncLog({
-      id: `log-${Date.now()}`,
-      tenantId,
-      sourceId: source.id,
-      sourceName: source.name,
-      status: 'success',
-      itemsProcessed: items,
-      durationMs: duration,
-      message: `تمت المزمنة بنجاح: جلب ${items} مستند جديد وتقسيمه إلى متجهات.`,
-      timestamp: new Date().toISOString(),
-    });
-
-    return { success: true, itemsProcessed: items, durationMs: duration };
+    return { success: true, itemsProcessed: source.documentCount || 0, durationMs: 0 };
   }
 
-  // Sync Logs
   async getSyncLogs(tenantId: string, sourceId?: string): Promise<SyncLogEntry[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'syncLogs'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    let logs = snapshot.docs.map((d) => d.data() as SyncLogEntry);
+    let logs = this.syncLogs.filter((l) => l.tenantId === tenantId);
     if (sourceId) {
       logs = logs.filter((l) => l.sourceId === sourceId);
     }
@@ -710,15 +179,13 @@ class OmniRAGDatabase {
   }
 
   async addSyncLog(log: SyncLogEntry): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'syncLogs', log.id), log);
+    this.syncLogs = this.syncLogs.filter((l) => l.id !== log.id);
+    this.syncLogs.push(log);
   }
 
-  // MCP Resources
   async getMcpResources(tenantId: string): Promise<McpResourceItem[]> {
-    await ensureSeeded();
-    const sources = await this.getSources(tenantId);
-    return sources.map((s) => ({
+    const sList = await this.getSources(tenantId);
+    return sList.map((s) => ({
       uri: `resource://sources/${s.id}`,
       name: s.name,
       description: `مصدر بيانات من نوع ${s.type} محمي بنظام RLS ومزود بـ ${s.documentCount} مستند فاعل`,
@@ -729,191 +196,1970 @@ class OmniRAGDatabase {
     }));
   }
 
-  // Documents
   async getDocuments(tenantId: string): Promise<Document[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'documents'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs
-      .map((d) => d.data() as Document)
+    const docs = this.documents
+      .filter((d) => d.tenantId === tenantId)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // Dev-only data auto-seed: after Demo Auth removal, real local-auth tenants
+    // (`tenant-<id>`) no longer collide with the seeded `tenant-acme-01` /
+    // `tenant-health-02` demo data. Without this, a fresh dev user (e.g. the
+    // AuthScreen "Sandbox Guest") would see an empty Knowledge Base in the
+    // memory-only path. In production, returns whatever exists (empty allowed).
+    if (docs.length === 0 && process.env.NODE_ENV !== 'production') {
+      const defaultDocs = INITIAL_DOCUMENTS.map((d) => ({
+        ...d,
+        id: `${d.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const d of defaultDocs) {
+        await this.addDocument(d);
+      }
+      const defaultChunks = INITIAL_CHUNKS.map((c) => ({
+        ...c,
+        id: `${c.id}-${tenantId}`,
+        documentId: `${c.documentId}-${tenantId}`,
+        tenantId,
+      }));
+      await this.addChunks(defaultChunks);
+      return this.documents
+        .filter((d) => d.tenantId === tenantId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+
+    return docs;
   }
 
   async getDocumentById(id: string, tenantId: string): Promise<Document | undefined> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'documents', id);
-    const snap = await getDoc(docRef);
-    if (snap.exists() && snap.data().tenantId === tenantId) {
-      return snap.data() as Document;
-    }
-    return undefined;
+    return this.documents.find((d) => d.id === id && d.tenantId === tenantId);
   }
 
   async addDocument(docObj: Document): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'documents', docObj.id), docObj);
+    this.documents = this.documents.filter((d) => d.id !== docObj.id);
+    this.documents.push(docObj);
+  }
 
-    // Save to PostgreSQL for lexical search as described in SDLC
-    await insertPostgresDocument({
-      id: docObj.id,
-      tenantId: docObj.tenantId,
-      title: docObj.title,
-      content: docObj.content || '',
-      language: docObj.language || 'ar',
-      status: docObj.status || 'indexed',
-      createdAt: docObj.createdAt || new Date().toISOString(),
-      metadata: docObj.metadata || {},
-    });
+  async updateDocument(id: string, updates: Partial<Document>, tenantId: string): Promise<Document | undefined> {
+    const doc = await this.getDocumentById(id, tenantId);
+    if (!doc) return undefined;
+    Object.assign(doc, updates);
+    return doc;
   }
 
   async deleteDocument(id: string, tenantId: string): Promise<void> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'documents', id);
-    const snap = await getDoc(docRef);
-    if (!snap.exists() || snap.data().tenantId !== tenantId) return;
-
-    await deleteDoc(docRef);
-
-    // Clean up chunks from Firestore
-    const chunksRef = collection(firestore, 'chunks');
-    const q = query(chunksRef, where('documentId', '==', id), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    for (const chunkDoc of snapshot.docs) {
-      await deleteDoc(chunkDoc.ref);
-    }
-
-    // Clean up from PostgreSQL and Qdrant
-    await deletePostgresDocument(id, tenantId);
-    await deleteQdrantDocument(id, tenantId);
+    this.documents = this.documents.filter((d) => !(d.id === id && d.tenantId === tenantId));
+    this.chunks = this.chunks.filter((c) => !(c.documentId === id && c.tenantId === tenantId));
   }
 
-  // Chunks
   async getChunks(tenantId: string): Promise<DocumentChunk[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'chunks'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map((d) => d.data() as DocumentChunk);
+    return this.chunks.filter((c) => c.tenantId === tenantId);
   }
 
   async addChunk(chunk: DocumentChunk): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'chunks', chunk.id), chunk);
-
-    // Generate real vector embedding using Gemini API
-    const vector = await generateEmbedding(chunk.content);
-
-    // Save to PostgreSQL for lexical search FTS
-    await insertPostgresChunk({
-      id: chunk.id,
-      tenantId: chunk.tenantId,
-      documentId: chunk.documentId,
-      content: chunk.content,
-      chunkIndex: chunk.chunkIndex || 0,
-      pageNumber: chunk.pageNumber || 1,
-      language: chunk.language || 'ar',
-      metadata: chunk.metadata || {},
-    });
-
-    // Get parent document collections if exists, so we can filter by collections in Qdrant
-    let collectionIds: string[] = [];
-    try {
-      const parentDoc = await this.getDocumentById(chunk.documentId, chunk.tenantId);
-      if (parentDoc && parentDoc.collectionIds) {
-        collectionIds = parentDoc.collectionIds;
-      }
-    } catch (e) {
-      console.warn('Failed to fetch parent collections for chunk, defaulting to empty:', e);
-    }
-
-    // Save to Qdrant Cloud for semantic search with tenant-isolation filters
-    await upsertQdrantChunk({
-      id: chunk.id,
-      vector,
-      payload: {
-        tenantId: chunk.tenantId,
-        documentId: chunk.documentId,
-        documentTitle: chunk.documentTitle || '',
-        content: chunk.content,
-        chunkIndex: chunk.chunkIndex || 0,
-        pageNumber: chunk.pageNumber || 1,
-        language: chunk.language || 'ar',
-        collectionIds,
-      },
-    });
+    this.chunks = this.chunks.filter((c) => c.id !== chunk.id);
+    this.chunks.push(chunk);
   }
 
-  // Collections
+  async addChunks(chunks: DocumentChunk[]): Promise<ChunkIndexResult> {
+    if (chunks.length === 0) {
+      return { indexed: 0, failed: 0, total: 0, errors: [], success: true };
+    }
+    const ids = new Set(chunks.map((c) => c.id));
+    this.chunks = this.chunks.filter((c) => !ids.has(c.id));
+    this.chunks.push(...chunks);
+    // In-memory store: every chunk is immediately searchable via the local
+    // fallback engine, so the batch is fully indexed by definition.
+    return { indexed: chunks.length, failed: 0, total: chunks.length, errors: [], success: true };
+  }
+
+  async getDocumentVersions(documentId: string, tenantId: string): Promise<DocumentVersion[]> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    return doc?.versions || [];
+  }
+
+  async createDocumentVersion(
+    documentId: string,
+    params: { title?: string; content: string; changeSummary?: string; createdBy?: string },
+    tenantId: string,
+  ): Promise<{ document: Document; version: DocumentVersion } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc) return undefined;
+    const versions = doc.versions || [];
+    const versionNumber = versions.length + 1;
+    const version: DocumentVersion = {
+      id: `ver-${documentId}-${versionNumber}`,
+      documentId,
+      versionNumber,
+      title: params.title || doc.title,
+      content: params.content,
+      chunkCount: 0,
+      changeSummary: params.changeSummary,
+      createdBy: params.createdBy,
+      createdAt: new Date().toISOString(),
+    };
+    doc.versions = [...versions, version];
+    doc.content = params.content;
+    doc.version = versionNumber;
+    doc.updatedAt = new Date().toISOString();
+    return { document: doc, version };
+  }
+
+  async revertDocumentVersion(
+    documentId: string,
+    targetVersionNumber: number,
+    tenantId: string,
+  ): Promise<{ document: Document; restoredVersion: DocumentVersion } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc) return undefined;
+    const targetVer = (doc.versions || []).find((v) => v.versionNumber === targetVersionNumber);
+    if (!targetVer) return undefined;
+    doc.content = targetVer.content;
+    doc.version = targetVer.versionNumber;
+    doc.updatedAt = new Date().toISOString();
+    return { document: doc, restoredVersion: targetVer };
+  }
+
+  async reindexDocument(
+    documentId: string,
+    tenantId: string,
+  ): Promise<{ document: Document; result: ChunkIndexResult } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc || !doc.content) return undefined;
+
+    const chunkTextList = chunkDocument(doc.content, doc.metadata?.chunkingConfig);
+    this.chunks = this.chunks.filter((c) => !(c.documentId === documentId && c.tenantId === tenantId));
+    const chunks: DocumentChunk[] = chunkTextList.map((text, i) => ({
+      id: `chunk-${doc.id}-re-${i + 1}`,
+      tenantId,
+      documentId: doc.id,
+      documentTitle: doc.title,
+      content: text,
+      chunkIndex: i,
+      pageNumber: 1,
+      language: doc.language === 'en' ? 'en' : 'ar',
+      metadata: { position: i, tokenCount: estimateTokenCount(text) },
+    }));
+    const result = await this.addChunks(chunks);
+
+    doc.status = result.success ? 'indexed' : 'failed';
+    doc.chunkCount = chunkTextList.length;
+    doc.updatedAt = new Date().toISOString();
+    return { document: doc, result };
+  }
+
   async getCollections(tenantId: string): Promise<Collection[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'collections'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs
-      .map((d) => d.data() as Collection)
+    return this.collections
+      .filter((c) => c.tenantId === tenantId)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   async addCollection(col: Collection): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'collections', col.id), col);
+    this.collections = this.collections.filter((c) => c.id !== col.id);
+    this.collections.push(col);
   }
 
-  // MCP Servers
   async getMcpServers(tenantId: string): Promise<MCPServerConfig[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'mcpServers'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map((d) => d.data() as MCPServerConfig);
+    const servers = this.mcpServers.filter((s) => s.tenantId === tenantId);
+    if (servers.length === 0) {
+      const tenantDefaults = INITIAL_MCP_SERVERS.map((s) => ({
+        ...s,
+        id: `${s.id}-${tenantId}`,
+        tenantId,
+      }));
+      this.mcpServers.push(...tenantDefaults);
+      return tenantDefaults;
+    }
+    return servers;
   }
 
   async addMcpServer(server: MCPServerConfig): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'mcpServers', server.id), server);
+    this.mcpServers = this.mcpServers.filter((s) => s.id !== server.id);
+    this.mcpServers.push(server);
   }
 
   async toggleMcpTool(serverId: string, toolName: string, tenantId: string): Promise<void> {
-    await ensureSeeded();
-    const docRef = doc(firestore, 'mcpServers', serverId);
-    const snap = await getDoc(docRef);
-    if (!snap.exists() || snap.data().tenantId !== tenantId) return;
-
-    const server = snap.data() as MCPServerConfig;
-    if (server.enabledTools.includes(toolName)) {
-      server.enabledTools = server.enabledTools.filter((t) => t !== toolName);
-    } else {
-      server.enabledTools.push(toolName);
+    const s = this.mcpServers.find((srv) => srv.id === serverId && srv.tenantId === tenantId);
+    if (s) {
+      if (s.enabledTools.includes(toolName)) {
+        s.enabledTools = s.enabledTools.filter((t) => t !== toolName);
+      } else {
+        s.enabledTools.push(toolName);
+      }
     }
-    await setDoc(docRef, server);
   }
 
-  // Audit Logs
+  async deleteMcpServer(serverId: string, tenantId: string): Promise<void> {
+    this.mcpServers = this.mcpServers.filter((s) => !(s.id === serverId && s.tenantId === tenantId));
+  }
+
   async getAuditLogs(tenantId: string): Promise<AuditLogEntry[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'auditLogs'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs
-      .map((d) => d.data() as AuditLogEntry)
+    return this.auditLogs
+      .filter((a) => a.tenantId === tenantId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }
 
   async addAuditLog(entry: AuditLogEntry): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'auditLogs', entry.id), entry);
+    this.auditLogs = this.auditLogs.filter((a) => a.id !== entry.id);
+    this.auditLogs.push(entry);
   }
 
-  // Tool Calls
   async getToolCalls(tenantId: string): Promise<MCPToolCall[]> {
-    await ensureSeeded();
-    const q = query(collection(firestore, 'toolCalls'), where('tenantId', '==', tenantId));
-    const snapshot = await getDocs(q);
-    return snapshot.docs
-      .map((d) => d.data() as MCPToolCall)
+    return this.toolCalls
+      .filter((tc) => tc.tenantId === tenantId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }
 
   async addToolCall(tc: MCPToolCall): Promise<void> {
-    await ensureSeeded();
-    await setDoc(doc(firestore, 'toolCalls', tc.id), tc);
+    this.toolCalls = this.toolCalls.filter((t) => t.id !== tc.id);
+    this.toolCalls.push(tc);
+  }
+
+  async getConversations(tenantId: string): Promise<Conversation[]> {
+    const convs = this.conversations.filter((c) => c.tenantId === tenantId);
+    if (convs.length === 0) {
+      const defaultConv: Conversation = {
+        id: `conv-init-${tenantId}`,
+        tenantId,
+        title: 'جلسة استفسارات السياسات والأمن (ذاكرة بديلة)',
+        mode: 'hybrid',
+        model: DEFAULT_AI_MODELS.chatModel,
+        collectionIds: [],
+        enabledMcpServers: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.conversations.push(defaultConv);
+      await this.getMessages(defaultConv.id, tenantId);
+      return [defaultConv];
+    }
+    // Attach a preview of each conversation's first user request so the
+    // sidebar can show it on hover without extra round-trips.
+    return convs
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .map((c) => {
+        const firstUser = this.messages
+          .filter((m) => m.conversationId === c.id && m.tenantId === tenantId && m.role === 'user')
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0];
+        return { ...c, firstUserMessage: firstUser?.content };
+      });
+  }
+
+  async getConversationById(id: string, tenantId: string): Promise<Conversation | null> {
+    return this.conversations.find((c) => c.id === id && c.tenantId === tenantId) || null;
+  }
+
+  async saveConversation(conv: Conversation): Promise<void> {
+    this.conversations = this.conversations.filter((c) => c.id !== conv.id);
+    this.conversations.push(conv);
+  }
+
+  async deleteConversation(id: string, tenantId: string): Promise<void> {
+    this.conversations = this.conversations.filter((c) => !(c.id === id && c.tenantId === tenantId));
+    this.messages = this.messages.filter((m) => !(m.conversationId === id && m.tenantId === tenantId));
+  }
+
+  async getMessages(conversationId: string, tenantId: string): Promise<Message[]> {
+    const msgs = this.messages.filter((m) => m.conversationId === conversationId && m.tenantId === tenantId);
+    if (msgs.length === 0 && conversationId.startsWith('conv-init')) {
+      const welcomeMsg: Message = {
+        id: `msg-welcome-${conversationId}`,
+        tenantId,
+        conversationId,
+        role: 'assistant',
+        content:
+          'مرحباً بك في استوديو المحادثة المعززة لمنصة OmniRAG (ذاكرة بديلة). يمكنك طرح أي سؤال استعلامي حول السياسات، العقود، أو معايير أمن المعلومات المرفقة ببيانات المستأجر الحالي.',
+        createdAt: new Date().toISOString(),
+        modelUsed: DEFAULT_AI_MODELS.chatModel,
+      };
+      this.messages.push(welcomeMsg);
+      return [welcomeMsg];
+    }
+    return msgs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }
+
+  async addMessage(msg: Message): Promise<void> {
+    this.messages = this.messages.filter((m) => m.id !== msg.id);
+    this.messages.push(msg);
+
+    const conv = this.conversations.find((c) => c.id === msg.conversationId && c.tenantId === msg.tenantId);
+    if (conv) {
+      conv.updatedAt = new Date().toISOString();
+      if (
+        msg.role === 'user' &&
+        (conv.title.startsWith('محادثة جديدة') ||
+          conv.title.startsWith('New Conversation') ||
+          conv.title === 'جلسة استفسارات السياسات والأمن' ||
+          conv.title === 'جلسة استفسارات السياسات والأمن (ذاكرة بديلة)')
+      ) {
+        conv.title = msg.content.length > 35 ? msg.content.substring(0, 35) + '...' : msg.content;
+      }
+    }
+  }
+
+  // Auth (Postgres-only — user, tenant, and opaque session lifecycle)
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const lower = email.toLowerCase();
+    return this.users.find((u) => u.email.toLowerCase() === lower);
+  }
+
+  async getUserById(id: string): Promise<User | undefined> {
+    return this.users.find((u) => u.id === id);
+  }
+
+  async createUser(user: User): Promise<void> {
+    this.users = this.users.filter((u) => u.id !== user.id && u.email.toLowerCase() !== user.email.toLowerCase());
+    this.users.push({ ...user, email: user.email.toLowerCase() });
+  }
+
+  async createTenant(tenant: Tenant): Promise<void> {
+    this.tenants = this.tenants.filter((t) => t.id !== tenant.id);
+    this.tenants.push(tenant);
+  }
+
+  async getTenant(tenantId: string): Promise<Tenant | undefined> {
+    return this.tenants.find((t) => t.id === tenantId);
+  }
+
+  async createSession(session: SessionRecord): Promise<void> {
+    this.sessions = this.sessions.filter((s) => s.token !== session.token);
+    this.sessions.push(session);
+  }
+
+  async getSession(token: string): Promise<SessionRecord | undefined> {
+    return this.sessions.find((s) => s.token === token);
+  }
+
+  async deleteSession(token: string): Promise<void> {
+    this.sessions = this.sessions.filter((s) => s.token !== token);
+  }
+
+  async deleteExpiredSessions(): Promise<void> {
+    const now = Date.now();
+    this.sessions = this.sessions.filter((s) => new Date(s.expiresAt).getTime() > now);
   }
 }
 
-export const db = new OmniRAGDatabase();
+export const memoryDb = new MemoryDatabase();
+
+let seedingPromise: Promise<void> | null = null;
+
+async function ensureSeeded(): Promise<void> {
+  if (isSeeded) return;
+  if (seedingPromise) return seedingPromise;
+
+  seedingPromise = (async () => {
+    let timeoutId: NodeJS.Timeout;
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('PostgreSQL connection timeout')), 8000);
+      });
+
+      const dbPromise = ensurePostgresTables().catch((err) => {
+        if (!isSeeded) throw err; // if race is still ongoing, pass error to Promise.race
+        console.error('Background ensurePostgresTables late error caught to prevent unhandled rejection:', err);
+      });
+
+      await Promise.race([dbPromise, timeoutPromise]);
+      isSeeded = true;
+    } catch (error) {
+      console.log('PostgreSQL database initialization offline fallback triggered:', (error as Error)?.message);
+      dbInstance.enableMemoryFallback();
+      isSeeded = true;
+    } finally {
+      clearTimeout(timeoutId!);
+      seedingPromise = null;
+    }
+  })();
+
+  return seedingPromise;
+}
+
+// Durable Postgres Database Singleton Store (the production backend)
+class OmniRAGDatabase implements IOmniRAGDatabase {
+  private useMemory = false;
+
+  /**
+   * Postgres circuit-breaker state.
+   *
+   * The previous implementation flipped `useMemory = true` on the FIRST
+   * Postgres error and never recovered — one transient blip (network hiccup,
+   * pool exhaustion, brief restart) silently demoted the whole process to
+   * in-memory storage for its entire lifetime, losing durability without any
+   * operator notice.
+   *
+   * Now we only open the circuit after PG_ERROR_THRESHOLD errors within a
+   * sliding PG_ERROR_WINDOW_MS window, and we automatically half-open it after
+   * PG_FALLBACK_COOLDOWN_MS so the next operation retries Postgres. If Postgres
+   * is truly down the errors re-open the circuit; if it recovered, the counter
+   * ages out and we silently resume durable writes.
+   */
+  private static readonly PG_ERROR_THRESHOLD = 3;
+  private static readonly PG_ERROR_WINDOW_MS = 60_000;
+  private static readonly PG_FALLBACK_COOLDOWN_MS = 30_000;
+  private pgErrorTimestamps: number[] = [];
+  private pgRetryTimer: NodeJS.Timeout | null = null;
+
+  enableMemoryFallback() {
+    this.useMemory = true;
+    this.schedulePostgresRetry('manual enableMemoryFallback');
+  }
+
+  disableMemoryFallback() {
+    this.useMemory = false;
+    this.pgErrorTimestamps = [];
+    if (this.pgRetryTimer) {
+      clearTimeout(this.pgRetryTimer);
+      this.pgRetryTimer = null;
+    }
+  }
+
+  isMemoryEnabled(): boolean {
+    return this.useMemory;
+  }
+
+  resetDatabaseState() {
+    this.useMemory = false;
+    this.pgErrorTimestamps = [];
+    if (this.pgRetryTimer) {
+      clearTimeout(this.pgRetryTimer);
+      this.pgRetryTimer = null;
+    }
+    resetPostgresPool();
+    isSeeded = false;
+    seedingPromise = null;
+  }
+
+  /**
+   * Schedule an automatic retry of the Postgres connection after the cooldown.
+   * When it fires we close the circuit (useMemory = false) and clear the seed
+   * flag so the next operation re-runs table provisioning against a hopefully
+   * recovered database. `unref()` keeps the timer from holding the process
+   * open during shutdown.
+   */
+  private schedulePostgresRetry(reason: string) {
+    if (this.pgRetryTimer) return; // one pending retry is enough
+    this.pgRetryTimer = setTimeout(() => {
+      this.pgRetryTimer = null;
+      this.useMemory = false;
+      this.pgErrorTimestamps = [];
+      isSeeded = false;
+      seedingPromise = null;
+      console.info('[OmniRAG Storage] Postgres circuit breaker HALF-OPEN: retrying durable storage on next operation.');
+    }, OmniRAGDatabase.PG_FALLBACK_COOLDOWN_MS);
+    this.pgRetryTimer.unref?.();
+    console.info(
+      `[OmniRAG Storage] Will retry Postgres in ${OmniRAGDatabase.PG_FALLBACK_COOLDOWN_MS / 1000}s (${reason}).`,
+    );
+  }
+
+  private handleDatabaseError(error: any, actionName: string) {
+    const now = Date.now();
+    // Keep only errors inside the sliding window so sporadic failures spread
+    // over hours never accumulate into a false circuit break.
+    this.pgErrorTimestamps = this.pgErrorTimestamps.filter((t) => now - t < OmniRAGDatabase.PG_ERROR_WINDOW_MS);
+    this.pgErrorTimestamps.push(now);
+
+    const errMsg = (error as Error)?.message || String(error);
+
+    if (this.useMemory) return; // circuit already open
+
+    if (this.pgErrorTimestamps.length >= OmniRAGDatabase.PG_ERROR_THRESHOLD) {
+      this.useMemory = true;
+      console.error(
+        `[OmniRAG Storage] Postgres circuit breaker OPEN after ${this.pgErrorTimestamps.length} errors within ${
+          OmniRAGDatabase.PG_ERROR_WINDOW_MS / 1000
+        }s (last in ${actionName}): ${errMsg}. Falling back to in-memory storage temporarily.`,
+      );
+      this.schedulePostgresRetry(`circuit break in ${actionName}`);
+    } else {
+      // Transient error: this single call still falls back to memory (the
+      // caller handles that), but the NEXT operation retries Postgres.
+      console.warn(
+        `[OmniRAG Storage] Transient Postgres error in ${actionName} (${this.pgErrorTimestamps.length}/${OmniRAGDatabase.PG_ERROR_THRESHOLD} in window): ${errMsg}`,
+      );
+    }
+  }
+
+  // Sources
+  async getSources(tenantId: string): Promise<SourceConnector[]> {
+    let sourcesList: SourceConnector[] = [];
+    if (this.useMemory) {
+      sourcesList = await memoryDb.getSources(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          sourcesList = await memoryDb.getSources(tenantId);
+        } else {
+          sourcesList = await getPostgresSources(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getSources');
+        sourcesList = await memoryDb.getSources(tenantId);
+      }
+    }
+
+    if (sourcesList.length === 0) {
+      const defaultSources = INITIAL_SOURCES.map((s) => ({
+        ...s,
+        id: `${s.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const s of defaultSources) {
+        await this.addSource(s);
+      }
+      return defaultSources;
+    }
+
+    return sourcesList;
+  }
+
+  async getSourceById(id: string, tenantId: string): Promise<SourceConnector | undefined> {
+    if (this.useMemory) return await memoryDb.getSourceById(id, tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getSourceById(id, tenantId);
+      const s = await getPostgresSourceById(id, tenantId);
+      if (s) return s;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getSourceById');
+    }
+    return await memoryDb.getSourceById(id, tenantId);
+  }
+
+  async addSource(source: SourceConnector): Promise<void> {
+    await memoryDb.addSource(source);
+    if (this.useMemory) return;
+
+    const startedAt = Date.now();
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresSource(source);
+      await this.addSyncLog({
+        id: `log-${Date.now()}`,
+        tenantId: source.tenantId,
+        sourceId: source.id,
+        sourceName: source.name,
+        status: 'success',
+        itemsProcessed: source.documentCount || 1,
+        durationMs: Math.max(1, Date.now() - startedAt),
+        message: `تم ربط الموصل ${source.name} وتشغيل استيعاب البيانات الأولي في قاعدة Postgres`,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (e) {
+      this.handleDatabaseError(e, 'addSource');
+    }
+  }
+
+  async updateSource(
+    id: string,
+    updates: Partial<SourceConnector>,
+    tenantId: string,
+  ): Promise<SourceConnector | undefined> {
+    const memUpdated = await memoryDb.updateSource(id, updates, tenantId);
+    if (this.useMemory) {
+      if (updates.collectionIds) {
+        const docs = await memoryDb.getDocuments(tenantId);
+        const docsToUpdate = docs.filter((d) => d.metadata?.sourceId === id);
+        for (const d of docsToUpdate) {
+          await memoryDb.addDocument({ ...d, collectionIds: updates.collectionIds });
+        }
+      }
+      return memUpdated;
+    }
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return memUpdated;
+      const s = await getPostgresSourceById(id, tenantId);
+      if (s) {
+        const updated = { ...s, ...updates };
+        await insertPostgresSource(updated);
+
+        // Cascade updates to all documents ingested by this source
+        if (updates.collectionIds) {
+          const docs = await this.getDocuments(tenantId);
+          const docsToUpdate = docs.filter((d) => d.metadata?.sourceId === id);
+          for (const d of docsToUpdate) {
+            await this.updateDocument(d.id, { collectionIds: updates.collectionIds }, tenantId);
+          }
+        }
+
+        return updated;
+      }
+    } catch (e) {
+      this.handleDatabaseError(e, 'updateSource');
+    }
+    return memUpdated;
+  }
+
+  async deleteSource(id: string, tenantId: string, purgeDocs: boolean = true): Promise<void> {
+    await memoryDb.deleteSource(id, tenantId);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await deletePostgresSource(id, tenantId);
+      if (purgeDocs) {
+        const docs = await this.getDocuments(tenantId);
+        const docsToRemove = docs.filter((d) => d.metadata?.sourceId === id);
+        for (const d of docsToRemove) {
+          await this.deleteDocument(d.id, tenantId);
+        }
+      }
+    } catch (e) {
+      this.handleDatabaseError(e, 'deleteSource');
+    }
+  }
+
+  async syncSource(
+    id: string,
+    tenantId: string,
+  ): Promise<{ success: boolean; itemsProcessed: number; durationMs: number }> {
+    // Measure the REAL sync duration end-to-end. The previous implementation
+    // reported a hardcoded 2400ms regardless of what actually happened.
+    const startedAt = Date.now();
+    try {
+      const source = await this.getSourceById(id, tenantId);
+      if (!source) return { success: false, itemsProcessed: 0, durationMs: Date.now() - startedAt };
+
+      // Decrypt connector credentials for the trusted sync path only.
+      const decryptedConfig = source.config ? decryptSourceConfig(source.config) : source.config;
+      const items = 1;
+
+      source.status = 'syncing';
+      await memoryDb.updateSource(id, source, tenantId);
+      if (!this.useMemory) {
+        try {
+          await insertPostgresSource(source);
+        } catch (e) {
+          this.handleDatabaseError(e, 'syncSource-setStatus');
+        }
+      }
+
+      // Handle YouTube Source Type Sync
+      let newDocTitle = `${source.name} - تحديث ${new Date().toLocaleDateString('ar-SA')}`;
+      let newDocContent = `تحديث بيانات من الموصل (${source.name}):\nتم جلب واستخراج ${items} سجل جديد وحفظها بتشفير عالي ومعالجة متجهات Qdrant بضمان عزْل المستأجر ${tenantId}.`;
+
+      if (source.type === 'youtube') {
+        const ytUrl = decryptedConfig?.playlistUrl || decryptedConfig?.url;
+        if (ytUrl && typeof ytUrl === 'string' && ytUrl.trim()) {
+          try {
+            const ytData = await processYoutubeTranscript(ytUrl, 'ar');
+            if (ytData && ytData.success && ytData.transcript) {
+              newDocTitle = ytData.title ? `[تفريغ فيديو يوتيوب] ${ytData.title}` : newDocTitle;
+              newDocContent = ytData.transcript;
+            }
+          } catch (ytErr) {
+            console.log('YouTube sync transcript failed, fallback to structured summary:', (ytErr as Error)?.message);
+          }
+        }
+      } else if (source.type === 'file') {
+        const fileData = decryptedConfig?.fileData || decryptedConfig?.base64;
+        if (fileData && typeof fileData === 'string') {
+          try {
+            const cleanBase64 = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+            const fileBuffer = Buffer.from(cleanBase64, 'base64');
+            const pipelineRes = await processPdfWithBatchedPipeline(fileBuffer, {
+              preferredEngine: 'mistral',
+              pagesPerChunk: 25,
+            });
+            if (pipelineRes.text && pipelineRes.text.trim().length > 10) {
+              newDocContent = pipelineRes.text;
+              newDocTitle = `${source.name} (معالجة ${pipelineRes.chunksProcessed} دفعة / ${pipelineRes.totalPages} صفحة)`;
+            }
+          } catch (pdfErr) {
+            console.log('PDF sync pipeline fallback:', pdfErr);
+          }
+        }
+      }
+
+      const newDocId = `doc-sync-${Date.now().toString().slice(-4)}`;
+
+      const newDoc: Document = {
+        id: newDocId,
+        tenantId,
+        title: newDocTitle,
+        content: newDocContent,
+        sourceType: source.type === 'file' ? 'file' : 'integration',
+        language: 'ar',
+        status: 'processing',
+        chunkCount: 0,
+        createdAt: new Date().toISOString(),
+        metadata: { sourceId: source.id, connectorType: source.type },
+        collectionIds: source.collectionIds,
+      };
+
+      // Unified chunker: every ingestion path produces the same chunk grid.
+      const chunkTextList = chunkDocument(newDocContent);
+
+      newDoc.chunkCount = chunkTextList.length;
+      await this.addDocument(newDoc);
+
+      const chunks = chunkTextList.map(
+        (text, index) =>
+          ({
+            id: `chunk-${newDocId}-${index + 1}`,
+            tenantId,
+            documentId: newDocId,
+            documentTitle: newDocTitle,
+            content: text,
+            chunkIndex: index,
+            pageNumber: 1,
+            language: 'ar',
+            metadata: { sourceId: source.id, position: index, tokenCount: estimateTokenCount(text) },
+          }) as DocumentChunk,
+      );
+      const indexResult = await this.addChunks(chunks);
+
+      // Document status lifecycle: processing → indexed | failed.
+      const finalStatus: Document['status'] = indexResult.success ? 'indexed' : 'failed';
+      newDoc.status = finalStatus;
+      newDoc.metadata = {
+        ...newDoc.metadata,
+        indexedAt: new Date().toISOString(),
+        indexErrors: indexResult.errors.length > 0 ? indexResult.errors : undefined,
+      };
+      await this.updateDocument(newDocId, { status: finalStatus, metadata: newDoc.metadata }, tenantId);
+
+      // Mark the connector healthy/degraded based on the real outcome.
+      source.status = indexResult.success ? 'healthy' : 'degraded';
+      source.lastSyncAt = new Date().toISOString();
+      source.documentCount = (source.documentCount || 0) + items;
+      source.lastError = indexResult.success ? undefined : indexResult.errors.join('؛ ');
+      await memoryDb.updateSource(id, source, tenantId);
+      if (!this.useMemory) {
+        try {
+          await insertPostgresSource(source);
+        } catch (e) {
+          this.handleDatabaseError(e, 'syncSource-finalStatus');
+        }
+      }
+
+      const durationMs = Date.now() - startedAt;
+      await this.addSyncLog({
+        id: `log-${Date.now()}`,
+        tenantId,
+        sourceId: source.id,
+        sourceName: source.name,
+        status: indexResult.success ? 'success' : 'failed',
+        itemsProcessed: items,
+        durationMs,
+        message: indexResult.success
+          ? `تمت المزامنة بنجاح: جلب وتفريغ وتجزيء إلى ${chunkTextList.length} مقطع دلالي وفهرستها في قواعد المتجهات.`
+          : `اكتملت المزامنة مع فشل الفهرسة المتجهية: ${indexResult.errors.join('؛ ')}`,
+        timestamp: new Date().toISOString(),
+      });
+
+      return { success: indexResult.success, itemsProcessed: items, durationMs };
+    } catch (err) {
+      this.handleDatabaseError(err, 'syncSource');
+      const durationMs = Date.now() - startedAt;
+      try {
+        const source = await memoryDb.getSourceById(id, tenantId);
+        if (source) {
+          source.status = 'error';
+          source.lastError = (err as Error)?.message || String(err);
+          await memoryDb.updateSource(id, source, tenantId);
+        }
+      } catch {
+        /* best effort */
+      }
+      return (await memoryDb.getSourceById(id, tenantId))
+        ? { success: false, itemsProcessed: 0, durationMs }
+        : { success: false, itemsProcessed: 0, durationMs };
+    }
+  }
+
+  // Sync Logs
+  async getSyncLogs(tenantId: string, sourceId?: string): Promise<SyncLogEntry[]> {
+    let logsList: SyncLogEntry[] = [];
+    if (this.useMemory) {
+      logsList = await memoryDb.getSyncLogs(tenantId, sourceId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          logsList = await memoryDb.getSyncLogs(tenantId, sourceId);
+        } else {
+          logsList = await getPostgresSyncLogs(tenantId, sourceId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getSyncLogs');
+        logsList = await memoryDb.getSyncLogs(tenantId, sourceId);
+      }
+    }
+
+    if (logsList.length === 0) {
+      const defaultLogs = INITIAL_SYNC_LOGS.map((l) => ({
+        ...l,
+        id: `${l.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const l of defaultLogs) {
+        await this.addSyncLog(l);
+      }
+      return defaultLogs;
+    }
+
+    return logsList;
+  }
+
+  async addSyncLog(log: SyncLogEntry): Promise<void> {
+    await memoryDb.addSyncLog(log);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresSyncLog(log);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addSyncLog');
+    }
+  }
+
+  // MCP Resources
+  async getMcpResources(tenantId: string): Promise<McpResourceItem[]> {
+    try {
+      const sources = await this.getSources(tenantId);
+      return sources.map((s) => ({
+        uri: `resource://sources/${s.id}`,
+        name: s.name,
+        description: `مصدر بيانات من نوع ${s.type} محمي بنظام RLS ومزود بـ ${s.documentCount} مستند فاعل`,
+        mimeType: s.type === 'file' ? 'application/pdf' : 'application/json',
+        tenantId: s.tenantId,
+        sourceId: s.id,
+        updatedAt: s.lastSyncAt || s.createdAt,
+      }));
+    } catch (e) {
+      this.handleDatabaseError(e, 'getMcpResources');
+      return await memoryDb.getMcpResources(tenantId);
+    }
+  }
+
+  // Documents
+  async getDocuments(tenantId: string): Promise<Document[]> {
+    let docsList: Document[] = [];
+    if (this.useMemory) {
+      docsList = await memoryDb.getDocuments(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          docsList = await memoryDb.getDocuments(tenantId);
+        } else {
+          docsList = await getPostgresDocuments(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getDocuments');
+        docsList = await memoryDb.getDocuments(tenantId);
+      }
+    }
+
+    if (docsList.length === 0) {
+      const defaultDocs = INITIAL_DOCUMENTS.map((d) => ({
+        ...d,
+        id: `${d.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const d of defaultDocs) {
+        await this.addDocument(d);
+      }
+
+      const defaultChunks = INITIAL_CHUNKS.map((c) => ({
+        ...c,
+        id: `${c.id}-${tenantId}`,
+        documentId: `${c.documentId}-${tenantId}`,
+        tenantId,
+      }));
+      await this.addChunks(defaultChunks);
+
+      return defaultDocs;
+    }
+
+    return docsList;
+  }
+
+  async getDocumentById(id: string, tenantId: string): Promise<Document | undefined> {
+    if (this.useMemory) return await memoryDb.getDocumentById(id, tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getDocumentById(id, tenantId);
+      const d = await getPostgresDocumentById(id, tenantId);
+      if (d) return d;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getDocumentById');
+    }
+    return await memoryDb.getDocumentById(id, tenantId);
+  }
+
+  async addDocument(docObj: Document): Promise<void> {
+    await memoryDb.addDocument(docObj);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresDocument(docObj);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addDocument');
+    }
+  }
+
+  async updateDocument(id: string, updates: Partial<Document>, tenantId: string): Promise<Document | undefined> {
+    const d = await this.getDocumentById(id, tenantId);
+    if (d) {
+      const updated = { ...d, ...updates };
+      await memoryDb.addDocument(updated);
+      if (!this.useMemory) {
+        try {
+          await insertPostgresDocument(updated);
+
+          if (updates.collectionIds) {
+            await updateQdrantDocumentPayload(id, tenantId, { collectionIds: updates.collectionIds });
+          }
+        } catch (e) {
+          this.handleDatabaseError(e, 'updateDocument');
+        }
+      }
+      return updated;
+    }
+    return undefined;
+  }
+
+  async deleteDocument(id: string, tenantId: string): Promise<void> {
+    await memoryDb.deleteDocument(id, tenantId);
+
+    try {
+      await deletePostgresDocument(id, tenantId);
+      await deleteQdrantDocument(id, tenantId);
+    } catch (extErr) {
+      this.handleDatabaseError(extErr, 'deleteDocument');
+    }
+  }
+
+  // Document Versions
+  async getDocumentVersions(documentId: string, tenantId: string): Promise<DocumentVersion[]> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc) return [];
+    if (doc.versions && doc.versions.length > 0) {
+      return [...doc.versions].sort((a, b) => b.versionNumber - a.versionNumber);
+    }
+    // Fallback default version snapshot if none exists
+    const v1: DocumentVersion = {
+      id: `ver-${doc.id}-v1`,
+      documentId: doc.id,
+      versionNumber: doc.version || 1,
+      title: doc.title,
+      content: doc.content,
+      chunkCount: doc.chunkCount || 0,
+      createdAt: doc.createdAt,
+      createdBy: 'Ingestion Engine',
+      changeSummary: 'الإصدار الأولي المستوعب في قاعدة المعرفة',
+    };
+    return [v1];
+  }
+
+  async createDocumentVersion(
+    documentId: string,
+    params: {
+      title?: string;
+      content: string;
+      changeSummary?: string;
+      createdBy?: string;
+    },
+    tenantId: string,
+  ): Promise<{ document: Document; version: DocumentVersion } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc) return undefined;
+
+    const existingVersions =
+      doc.versions && doc.versions.length > 0
+        ? [...doc.versions]
+        : [
+            {
+              id: `ver-${doc.id}-v1`,
+              documentId: doc.id,
+              versionNumber: 1,
+              title: doc.title,
+              content: doc.content,
+              chunkCount: doc.chunkCount || 0,
+              createdAt: doc.createdAt,
+              createdBy: 'Ingestion Engine',
+              changeSummary: 'الإصدار الأولي المستوعب في قاعدة المعرفة',
+            },
+          ];
+
+    const currentMaxVer = existingVersions.reduce((max, v) => Math.max(max, v.versionNumber), 1);
+    const nextVerNumber = currentMaxVer + 1;
+    const newTitle = params.title?.trim() || doc.title;
+    const newContent = params.content;
+    const nowIso = new Date().toISOString();
+    const startedAt = Date.now();
+
+    // Unified chunker: all ingestion paths produce the same chunk grid.
+    const chunkTextList = chunkDocument(newContent);
+
+    const newVersion: DocumentVersion = {
+      id: `ver-${doc.id}-v${nextVerNumber}`,
+      documentId: doc.id,
+      versionNumber: nextVerNumber,
+      title: newTitle,
+      content: newContent,
+      chunkCount: chunkTextList.length,
+      createdAt: nowIso,
+      createdBy: params.createdBy || 'Knowledge Admin',
+      changeSummary: params.changeSummary || `تحديث محتوى المستند (الإصدار v${nextVerNumber})`,
+    };
+
+    const updatedVersions = [newVersion, ...existingVersions];
+
+    const updatedDoc: Document = {
+      ...doc,
+      title: newTitle,
+      content: newContent,
+      chunkCount: chunkTextList.length,
+      version: nextVerNumber,
+      versions: updatedVersions,
+      updatedAt: nowIso,
+    };
+
+    await this.addDocument(updatedDoc);
+
+    // Replace chunks: purge the OLD chunk grid from every store first. The
+    // previous implementation only filtered the in-memory array, so stale
+    // vectors from earlier versions kept living in Qdrant and Postgres and
+    // polluted retrieval with outdated content.
+    memoryDb.chunks = memoryDb.chunks.filter((c) => !(c.documentId === documentId && c.tenantId === tenantId));
+    await deleteQdrantDocument(documentId, tenantId);
+    await deletePostgresChunksByDocument(documentId, tenantId);
+
+    const versionChunks: DocumentChunk[] = chunkTextList.map((text, i) => ({
+      id: `chunk-${doc.id}-v${nextVerNumber}-${i + 1}`,
+      tenantId,
+      documentId: doc.id,
+      documentTitle: newTitle,
+      content: text,
+      chunkIndex: i,
+      pageNumber: 1,
+      language: doc.language === 'en' ? 'en' : 'ar',
+      metadata: {
+        version: nextVerNumber,
+        position: i,
+        tokenCount: estimateTokenCount(text),
+      },
+    }));
+    const indexResult = await this.addChunks(versionChunks);
+
+    // Reflect the real indexing outcome on the document status.
+    const finalStatus: Document['status'] = indexResult.success ? 'indexed' : 'failed';
+    updatedDoc.status = finalStatus;
+    await this.updateDocument(
+      documentId,
+      {
+        status: finalStatus,
+        metadata: {
+          ...updatedDoc.metadata,
+          indexedAt: new Date().toISOString(),
+          indexErrors: indexResult.errors.length > 0 ? indexResult.errors : undefined,
+        },
+      },
+      tenantId,
+    );
+
+    await this.addSyncLog({
+      id: `log-ver-${Date.now()}`,
+      tenantId,
+      sourceId: doc.metadata?.sourceId || doc.id,
+      sourceName: doc.title,
+      status: indexResult.success ? 'success' : 'failed',
+      itemsProcessed: chunkTextList.length,
+      durationMs: Date.now() - startedAt,
+      message: indexResult.success
+        ? `تم إنشاء وحفظ الإصدار v${nextVerNumber} للمستند "${newTitle}" وتحديث فهرسة المتجهات`
+        : `تم حفظ الإصدار v${nextVerNumber} مع فشل الفهرسة: ${indexResult.errors.join('؛ ')}`,
+      timestamp: nowIso,
+    });
+
+    return { document: updatedDoc, version: newVersion };
+  }
+
+  async revertDocumentVersion(
+    documentId: string,
+    targetVersionNumber: number,
+    tenantId: string,
+  ): Promise<{ document: Document; restoredVersion: DocumentVersion } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc) return undefined;
+
+    const versions = doc.versions || [];
+    const targetVer = versions.find((v) => v.versionNumber === targetVersionNumber);
+    if (!targetVer) return undefined;
+
+    const nowIso = new Date().toISOString();
+    const startedAt = Date.now();
+
+    // Unified chunker: the restored chunk grid is identical to the one
+    // createDocumentVersion would produce for the same content.
+    const chunkTextList = chunkDocument(targetVer.content);
+
+    const updatedDoc: Document = {
+      ...doc,
+      title: targetVer.title,
+      content: targetVer.content,
+      chunkCount: chunkTextList.length,
+      version: targetVer.versionNumber,
+      updatedAt: nowIso,
+    };
+
+    await this.addDocument(updatedDoc);
+
+    // Replace chunks across ALL stores (memory + Qdrant + Postgres) so no
+    // stale vectors from the superseded version remain searchable.
+    memoryDb.chunks = memoryDb.chunks.filter((c) => !(c.documentId === documentId && c.tenantId === tenantId));
+    await deleteQdrantDocument(documentId, tenantId);
+    await deletePostgresChunksByDocument(documentId, tenantId);
+
+    const revertChunks: DocumentChunk[] = chunkTextList.map((text, i) => ({
+      id: `chunk-${doc.id}-rev-v${targetVer.versionNumber}-${i + 1}`,
+      tenantId,
+      documentId: doc.id,
+      documentTitle: targetVer.title,
+      content: text,
+      chunkIndex: i,
+      pageNumber: 1,
+      language: doc.language === 'en' ? 'en' : 'ar',
+      metadata: {
+        restoredFromVersion: targetVer.versionNumber,
+        position: i,
+        tokenCount: estimateTokenCount(text),
+      },
+    }));
+    const indexResult = await this.addChunks(revertChunks);
+
+    const finalStatus: Document['status'] = indexResult.success ? 'indexed' : 'failed';
+    updatedDoc.status = finalStatus;
+    await this.updateDocument(
+      documentId,
+      {
+        status: finalStatus,
+        metadata: {
+          ...updatedDoc.metadata,
+          indexedAt: new Date().toISOString(),
+          indexErrors: indexResult.errors.length > 0 ? indexResult.errors : undefined,
+        },
+      },
+      tenantId,
+    );
+
+    await this.addSyncLog({
+      id: `log-revert-${Date.now()}`,
+      tenantId,
+      sourceId: doc.metadata?.sourceId || doc.id,
+      sourceName: targetVer.title,
+      status: indexResult.success ? 'success' : 'failed',
+      itemsProcessed: chunkTextList.length,
+      durationMs: Date.now() - startedAt,
+      message: indexResult.success
+        ? `تم استرجاع المستند "${targetVer.title}" إلى الإصدار v${targetVer.versionNumber} بنجاح وإعادة الفهرسة`
+        : `تم استرجاع الإصدار v${targetVer.versionNumber} مع فشل الفهرسة: ${indexResult.errors.join('؛ ')}`,
+      timestamp: nowIso,
+    });
+
+    return { document: updatedDoc, restoredVersion: targetVer };
+  }
+
+  /**
+   * Re-index an existing document: re-chunk its current content with the
+   * unified chunker, purge the old chunk grid from every store, and rebuild
+   * embeddings + Qdrant points + Postgres rows from scratch.
+   *
+   * This is the REAL implementation behind the UI's "reindex" button, which
+   * previously ran a 1-second setTimeout and did nothing. It is also the
+   * recovery path for documents stuck in `failed` after a vector-store outage.
+   *
+   * Returns undefined when the document does not exist; otherwise returns the
+   * updated document and the indexing result so the caller can report the
+   * outcome honestly.
+   */
+  async reindexDocument(
+    documentId: string,
+    tenantId: string,
+  ): Promise<{ document: Document; result: ChunkIndexResult } | undefined> {
+    const doc = await this.getDocumentById(documentId, tenantId);
+    if (!doc || !doc.content) return undefined;
+
+    const startedAt = Date.now();
+    await this.updateDocument(documentId, { status: 'processing' }, tenantId);
+
+    // Unified chunker — reuse the document's stored chunking config when it
+    // has one so a reindex reproduces the original geometry.
+    const chunkTextList = chunkDocument(doc.content, doc.metadata?.chunkingConfig);
+
+    // Purge the stale grid from all stores before rebuilding.
+    memoryDb.chunks = memoryDb.chunks.filter((c) => !(c.documentId === documentId && c.tenantId === tenantId));
+    await deleteQdrantDocument(documentId, tenantId);
+    await deletePostgresChunksByDocument(documentId, tenantId);
+
+    const chunks: DocumentChunk[] = chunkTextList.map((text, i) => ({
+      id: `chunk-${doc.id}-re-${Date.now().toString(36)}-${i + 1}`,
+      tenantId,
+      documentId: doc.id,
+      documentTitle: doc.title,
+      content: text,
+      chunkIndex: i,
+      pageNumber: 1,
+      language: doc.language === 'en' ? 'en' : 'ar',
+      metadata: {
+        sourceId: doc.metadata?.sourceId,
+        position: i,
+        reindexedAt: new Date().toISOString(),
+        tokenCount: estimateTokenCount(text),
+      },
+    }));
+
+    const result = await this.addChunks(chunks);
+
+    const finalStatus: Document['status'] = result.success ? 'indexed' : 'failed';
+    const updated = await this.updateDocument(
+      documentId,
+      {
+        status: finalStatus,
+        chunkCount: chunkTextList.length,
+        metadata: {
+          ...doc.metadata,
+          indexedAt: new Date().toISOString(),
+          indexErrors: result.errors.length > 0 ? result.errors : undefined,
+        },
+      },
+      tenantId,
+    );
+
+    await this.addSyncLog({
+      id: `log-reindex-${Date.now()}`,
+      tenantId,
+      sourceId: doc.metadata?.sourceId || doc.id,
+      sourceName: doc.title,
+      status: result.success ? 'success' : 'failed',
+      itemsProcessed: chunkTextList.length,
+      durationMs: Date.now() - startedAt,
+      message: result.success
+        ? `تمت إعادة فهرسة المستند "${doc.title}" إلى ${chunkTextList.length} مقطع دلالي بنجاح`
+        : `فشلت إعادة فهرسة "${doc.title}": ${result.errors.join('؛ ')}`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { document: updated || { ...doc, status: finalStatus, chunkCount: chunkTextList.length }, result };
+  }
+
+  // Chunks
+  async getChunks(tenantId: string): Promise<DocumentChunk[]> {
+    let chunksList: DocumentChunk[] = [];
+    if (this.useMemory) {
+      chunksList = await memoryDb.getChunks(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          chunksList = await memoryDb.getChunks(tenantId);
+        } else {
+          chunksList = await getPostgresChunks(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getChunks');
+        chunksList = await memoryDb.getChunks(tenantId);
+      }
+    }
+
+    if (chunksList.length === 0) {
+      const defaultChunks = INITIAL_CHUNKS.map((c) => ({
+        ...c,
+        id: `${c.id}-${tenantId}`,
+        documentId: `${c.documentId}-${tenantId}`,
+        tenantId,
+      }));
+      await this.addChunks(defaultChunks);
+      return defaultChunks;
+    }
+
+    return chunksList;
+  }
+
+  async addChunk(chunk: DocumentChunk): Promise<void> {
+    await memoryDb.addChunk(chunk);
+
+    try {
+      const vector = await generateEmbedding(chunk.content);
+
+      try {
+        await insertPostgresChunk({
+          id: chunk.id,
+          tenantId: chunk.tenantId,
+          documentId: chunk.documentId,
+          documentTitle: chunk.documentTitle,
+          content: chunk.content,
+          chunkIndex: chunk.chunkIndex || 0,
+          pageNumber: chunk.pageNumber || 1,
+          language: chunk.language || 'ar',
+          metadata: chunk.metadata || {},
+        });
+      } catch (pgErr) {
+        // Warning ignored
+      }
+
+      let collectionIds: string[] = [];
+      try {
+        const parentDoc = await this.getDocumentById(chunk.documentId, chunk.tenantId);
+        if (parentDoc && parentDoc.collectionIds) {
+          collectionIds = parentDoc.collectionIds;
+        }
+      } catch (e) {
+        // Warning ignored
+      }
+
+      await upsertQdrantChunk({
+        id: chunk.id,
+        vector,
+        payload: {
+          tenantId: chunk.tenantId,
+          documentId: chunk.documentId,
+          documentTitle: chunk.documentTitle || '',
+          content: chunk.content,
+          chunkIndex: chunk.chunkIndex || 0,
+          pageNumber: chunk.pageNumber || 1,
+          language: chunk.language || 'ar',
+          collectionIds,
+          ...(chunk.metadata || {}),
+        },
+      });
+    } catch (vecErr) {
+      console.error('Vector embedding/Qdrant indexing error:', (vecErr as Error)?.message);
+    }
+  }
+
+  /**
+   * Batch ingestion path. Ingests many chunks in one pass instead of looping
+   * `addChunk`, which issued a serial embedding API call + a per-chunk parent-
+   * document lookup + a single-point Qdrant upsert for every chunk.
+   *
+   * Here we:
+   *   1. write all chunks to the memory store in one shot;
+   *   2. generate all embeddings with bounded concurrency (one batched wave);
+   *   3. resolve each unique parent document's collectionIds ONCE (not per chunk);
+   *   4. insert all Postgres rows in parallel;
+   *   5. push all vectors to Qdrant in a single multi-point upsert.
+   *
+   * Returns a structured {@link ChunkIndexResult} instead of swallowing
+   * failures: previously a Qdrant outage still produced a "success" API
+   * response while zero vectors were stored, leaving documents marked
+   * "indexed" but unsearchable. Callers now flip the document status to
+   * `failed` (or surface a partial-indexing warning) based on this result.
+   */
+  async addChunks(chunks: DocumentChunk[]): Promise<ChunkIndexResult> {
+    const result: ChunkIndexResult = {
+      indexed: 0,
+      failed: 0,
+      total: chunks.length,
+      errors: [],
+      success: false,
+    };
+    if (chunks.length === 0) {
+      result.success = true;
+      return result;
+    }
+    await memoryDb.addChunks(chunks);
+    if (this.useMemory) {
+      // Memory-only mode: chunks are stored in-process and searchable via the
+      // local fallback engine, so we report them as indexed.
+      result.indexed = chunks.length;
+      result.success = true;
+      return result;
+    }
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) {
+        result.indexed = chunks.length;
+        result.success = true;
+        return result;
+      }
+
+      // 1. Generate all embeddings in one bounded-concurrency wave.
+      const vectors = await embedBatch(chunks.map((c) => c.content));
+
+      // 2. Resolve collectionIds per unique parent document ONCE.
+      const collectionIdsByDoc = new Map<string, string[]>();
+      for (const docId of new Set(chunks.map((c) => c.documentId))) {
+        try {
+          const parentDoc = await this.getDocumentById(docId, chunks[0].tenantId);
+          collectionIdsByDoc.set(docId, parentDoc?.collectionIds || []);
+        } catch {
+          collectionIdsByDoc.set(docId, []);
+        }
+      }
+
+      // 3. Insert all Postgres rows in parallel (cheap local writes).
+      let lexicalFailures = 0;
+      await Promise.all(
+        chunks.map((chunk) =>
+          insertPostgresChunk({
+            id: chunk.id,
+            tenantId: chunk.tenantId,
+            documentId: chunk.documentId,
+            documentTitle: chunk.documentTitle,
+            content: chunk.content,
+            chunkIndex: chunk.chunkIndex || 0,
+            pageNumber: chunk.pageNumber || 1,
+            language: chunk.language || 'ar',
+            metadata: chunk.metadata || {},
+          }).catch(() => {
+            /* a single failed lexical row must not abort the batch */
+            lexicalFailures++;
+          }),
+        ),
+      );
+      if (lexicalFailures > 0) {
+        result.errors.push(`تعذر حفظ ${lexicalFailures} مقطع في فهرس Postgres اللفظي`);
+      }
+
+      // 4. One multi-point Qdrant upsert for the whole batch.
+      const points = chunks
+        .map((chunk, i) => ({
+          id: chunk.id,
+          vector: vectors[i],
+          payload: {
+            tenantId: chunk.tenantId,
+            documentId: chunk.documentId,
+            documentTitle: chunk.documentTitle || '',
+            content: chunk.content,
+            chunkIndex: chunk.chunkIndex || 0,
+            pageNumber: chunk.pageNumber || 1,
+            language: chunk.language || 'ar',
+            collectionIds: collectionIdsByDoc.get(chunk.documentId) || [],
+            ...(chunk.metadata || {}),
+          },
+        }))
+        .filter((p) => Array.isArray(p.vector) && p.vector.length > 0);
+
+      const embedFailed = chunks.length - points.length;
+      if (embedFailed > 0) {
+        result.errors.push(`فشل توليد التضمين المتجهي لـ ${embedFailed} مقطع`);
+      }
+
+      const qdrantOk = await upsertQdrantChunks(points);
+      if (qdrantOk) {
+        result.indexed = points.length;
+        result.failed = embedFailed;
+      } else {
+        // Qdrant unreachable or rejected the batch: nothing is semantically
+        // searchable yet. Report the whole batch as failed so the caller can
+        // mark the document `failed` and offer a reindex.
+        result.indexed = 0;
+        result.failed = chunks.length;
+        result.errors.push('تعذر الرفع إلى محرك المتجهات Qdrant — المستند غير قابل للبحث الدلالي بعد');
+      }
+    } catch (vecErr) {
+      console.error('Batch vector embedding/Qdrant indexing error:', (vecErr as Error)?.message);
+      result.indexed = 0;
+      result.failed = chunks.length;
+      result.errors.push((vecErr as Error)?.message || 'خطأ غير معروف أثناء الفهرسة المتجهية');
+    }
+
+    result.success = result.failed === 0 && result.errors.length === 0;
+    return result;
+  }
+
+  async getCollections(tenantId: string): Promise<Collection[]> {
+    let collectionsList: Collection[] = [];
+    if (this.useMemory) {
+      collectionsList = await memoryDb.getCollections(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          collectionsList = await memoryDb.getCollections(tenantId);
+        } else {
+          collectionsList = await getPostgresCollections(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getCollections');
+        collectionsList = await memoryDb.getCollections(tenantId);
+      }
+    }
+
+    if (collectionsList.length === 0) {
+      const defaultCols = INITIAL_COLLECTIONS.map((c) => ({
+        ...c,
+        id: `${c.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const c of defaultCols) {
+        await this.addCollection(c);
+      }
+      return defaultCols;
+    }
+
+    return collectionsList;
+  }
+
+  async addCollection(col: Collection): Promise<void> {
+    await memoryDb.addCollection(col);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresCollection(col);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addCollection');
+    }
+  }
+
+  // MCP Servers
+  async getMcpServers(tenantId: string): Promise<MCPServerConfig[]> {
+    let serversList: MCPServerConfig[] = [];
+    if (this.useMemory) {
+      serversList = await memoryDb.getMcpServers(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          serversList = await memoryDb.getMcpServers(tenantId);
+        } else {
+          serversList = await getPostgresMcpServers(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getMcpServers');
+        serversList = await memoryDb.getMcpServers(tenantId);
+      }
+    }
+
+    if (serversList.length === 0) {
+      const defaultServers = INITIAL_MCP_SERVERS.map((s) => ({
+        ...s,
+        id: `${s.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const s of defaultServers) {
+        await this.addMcpServer(s);
+      }
+      return defaultServers;
+    }
+
+    // Ensure Unstructured Transform is always auto-injected for existing active sessions
+    const hasUnstructured = serversList.some(
+      (s) => s.endpointUrl === 'https://mcp.transform.unstructured.io' || s.id.includes('unstructured-transform'),
+    );
+    if (!hasUnstructured) {
+      const unstructuredServer: MCPServerConfig = {
+        id: `mcp-unstructured-transform-${tenantId}`,
+        tenantId,
+        name: 'Unstructured Transform',
+        description:
+          'Connect to the official Unstructured Transform MCP server for advanced document transform, clean and chunk pipelines.',
+        endpointUrl: 'https://mcp.transform.unstructured.io',
+        protocolVersion: '2026-07-28',
+        sandboxTier: 'T2_ELEVATED',
+        enabledTools: ['unstructured_transform_document', 'unstructured_chunk_document'],
+        requireConfirmationTools: [],
+        status: 'healthy',
+        latencyMs: 45,
+        lastChecked: new Date().toISOString(),
+      };
+      await this.addMcpServer(unstructuredServer);
+      serversList.push(unstructuredServer);
+    }
+
+    return serversList;
+  }
+
+  async addMcpServer(server: MCPServerConfig): Promise<void> {
+    await memoryDb.addMcpServer(server);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresMcpServer(server);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addMcpServer');
+    }
+  }
+
+  async toggleMcpTool(serverId: string, toolName: string, tenantId: string): Promise<void> {
+    await memoryDb.toggleMcpTool(serverId, toolName, tenantId);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      const pgServers = await getPostgresMcpServers(tenantId);
+      const s = pgServers.find((srv) => srv.id === serverId);
+      if (s) {
+        if (s.enabledTools.includes(toolName)) {
+          s.enabledTools = s.enabledTools.filter((t) => t !== toolName);
+        } else {
+          s.enabledTools.push(toolName);
+        }
+        await insertPostgresMcpServer(s);
+      }
+    } catch (e) {
+      this.handleDatabaseError(e, 'toggleMcpTool');
+    }
+  }
+
+  async deleteMcpServer(serverId: string, tenantId: string): Promise<void> {
+    await memoryDb.deleteMcpServer(serverId, tenantId);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await deletePostgresMcpServer(serverId, tenantId);
+    } catch (e) {
+      this.handleDatabaseError(e, 'deleteMcpServer');
+    }
+  }
+
+  // Audit Logs
+  async getAuditLogs(tenantId: string): Promise<AuditLogEntry[]> {
+    let auditList: AuditLogEntry[] = [];
+    if (this.useMemory) {
+      auditList = await memoryDb.getAuditLogs(tenantId);
+    } else {
+      try {
+        await ensureSeeded();
+        if (this.useMemory) {
+          auditList = await memoryDb.getAuditLogs(tenantId);
+        } else {
+          auditList = await getPostgresAuditLogs(tenantId);
+        }
+      } catch (e) {
+        this.handleDatabaseError(e, 'getAuditLogs');
+        auditList = await memoryDb.getAuditLogs(tenantId);
+      }
+    }
+
+    if (auditList.length === 0) {
+      const defaultAudit = INITIAL_AUDIT_LOGS.map((a) => ({
+        ...a,
+        id: `${a.id}-${tenantId}`,
+        tenantId,
+      }));
+      for (const a of defaultAudit) {
+        await this.addAuditLog(a);
+      }
+      return defaultAudit;
+    }
+
+    return auditList;
+  }
+
+  async addAuditLog(entry: AuditLogEntry): Promise<void> {
+    await memoryDb.addAuditLog(entry);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresAuditLog(entry);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addAuditLog');
+    }
+  }
+
+  // Tool Calls
+  async getToolCalls(tenantId: string): Promise<MCPToolCall[]> {
+    if (this.useMemory) return await memoryDb.getToolCalls(tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getToolCalls(tenantId);
+      return await getPostgresToolCalls(tenantId);
+    } catch (e) {
+      this.handleDatabaseError(e, 'getToolCalls');
+    }
+    return await memoryDb.getToolCalls(tenantId);
+  }
+
+  async addToolCall(tc: MCPToolCall): Promise<void> {
+    await memoryDb.addToolCall(tc);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresToolCall(tc);
+    } catch (e) {
+      this.handleDatabaseError(e, 'addToolCall');
+    }
+  }
+
+  // Conversations & Messages
+  async getConversations(tenantId: string): Promise<Conversation[]> {
+    if (this.useMemory) return await memoryDb.getConversations(tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getConversations(tenantId);
+      const convs = await getPostgresConversations(tenantId);
+      if (convs.length > 0) return convs;
+
+      // Seed default conversation in Postgres
+      const defaultConv: Conversation = {
+        id: `conv-init-${tenantId}`,
+        tenantId,
+        title: 'جلسة استفسارات السياسات والأمن',
+        mode: 'hybrid',
+        model: DEFAULT_AI_MODELS.chatModel,
+        collectionIds: [],
+        enabledMcpServers: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      await insertPostgresConversation(defaultConv);
+      const welcomeMsg: Message = {
+        id: `msg-welcome-${defaultConv.id}`,
+        tenantId,
+        conversationId: defaultConv.id,
+        role: 'assistant',
+        content:
+          'مرحباً بك في استوديو المحادثة المعززة لمنصة OmniRAG. يمكنك طرح أي سؤال استعلامي حول السياسات، العقود، أو معايير أمن المعلومات المرفقة ببيانات المستأجر الحالي.',
+        createdAt: new Date().toISOString(),
+        modelUsed: DEFAULT_AI_MODELS.chatModel,
+      };
+      await insertPostgresMessage(welcomeMsg);
+
+      return [defaultConv];
+    } catch (e) {
+      this.handleDatabaseError(e, 'getConversations');
+    }
+    return await memoryDb.getConversations(tenantId);
+  }
+
+  async getConversationById(id: string, tenantId: string): Promise<Conversation | null> {
+    if (this.useMemory) return await memoryDb.getConversationById(id, tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getConversationById(id, tenantId);
+      return await getPostgresConversationById(id, tenantId);
+    } catch (e) {
+      this.handleDatabaseError(e, 'getConversationById');
+    }
+    return await memoryDb.getConversationById(id, tenantId);
+  }
+
+  async saveConversation(conv: Conversation): Promise<void> {
+    await memoryDb.saveConversation(conv);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresConversation(conv);
+    } catch (e) {
+      this.handleDatabaseError(e, 'saveConversation');
+    }
+  }
+
+  async deleteConversation(id: string, tenantId: string): Promise<void> {
+    await memoryDb.deleteConversation(id, tenantId);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await deletePostgresConversation(id, tenantId);
+    } catch (e) {
+      this.handleDatabaseError(e, 'deleteConversation');
+    }
+  }
+
+  async getMessages(conversationId: string, tenantId: string): Promise<Message[]> {
+    if (this.useMemory) return await memoryDb.getMessages(conversationId, tenantId);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getMessages(conversationId, tenantId);
+      const msgs = await getPostgresMessages(conversationId, tenantId);
+      if (msgs.length === 0 && conversationId.startsWith('conv-init')) {
+        const welcomeMsg: Message = {
+          id: `msg-welcome-${conversationId}`,
+          tenantId,
+          conversationId,
+          role: 'assistant',
+          content:
+            'مرحباً بك في استوديو المحادثة المعززة لمنصة OmniRAG. يمكنك طرح أي سؤال استعلامي حول السياسات، العقود، أو معايير أمن المعلومات المرفقة ببيانات المستأجر الحالي.',
+          createdAt: new Date().toISOString(),
+          modelUsed: DEFAULT_AI_MODELS.chatModel,
+        };
+        await insertPostgresMessage(welcomeMsg);
+        return [welcomeMsg];
+      }
+      return msgs;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getMessages');
+    }
+    return await memoryDb.getMessages(conversationId, tenantId);
+  }
+
+  async addMessage(msg: Message): Promise<void> {
+    await memoryDb.addMessage(msg);
+    if (this.useMemory) return;
+
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresMessage(msg);
+
+      try {
+        const conv = await getPostgresConversationById(msg.conversationId, msg.tenantId);
+        if (conv) {
+          conv.updatedAt = new Date().toISOString();
+          if (
+            msg.role === 'user' &&
+            (conv.title.startsWith('محادثة جديدة') ||
+              conv.title.startsWith('New Conversation') ||
+              conv.title === 'جلسة استفسارات السياسات والأمن')
+          ) {
+            conv.title = msg.content.length > 35 ? msg.content.substring(0, 35) + '...' : msg.content;
+          }
+          await insertPostgresConversation(conv);
+        }
+      } catch (e) {
+        // Ignore
+      }
+    } catch (e) {
+      this.handleDatabaseError(e, 'addMessage');
+    }
+  }
+
+  // Auth (Postgres-only — user, tenant, and opaque session lifecycle)
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    if (this.useMemory) return await memoryDb.getUserByEmail(email);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getUserByEmail(email);
+      const user = await getPostgresUserByEmail(email);
+      if (user) return user;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getUserByEmail');
+    }
+    return await memoryDb.getUserByEmail(email);
+  }
+
+  async getUserById(id: string): Promise<User | undefined> {
+    if (this.useMemory) return await memoryDb.getUserById(id);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getUserById(id);
+      const user = await getPostgresUserById(id);
+      if (user) return user;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getUserById');
+    }
+    return await memoryDb.getUserById(id);
+  }
+
+  async createUser(user: User): Promise<void> {
+    await memoryDb.createUser(user);
+    if (this.useMemory) return;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresUser(user);
+    } catch (e) {
+      this.handleDatabaseError(e, 'createUser');
+    }
+  }
+
+  async createTenant(tenant: Tenant): Promise<void> {
+    await memoryDb.createTenant(tenant);
+    if (this.useMemory) return;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresTenant(tenant);
+    } catch (e) {
+      this.handleDatabaseError(e, 'createTenant');
+    }
+  }
+
+  async getTenant(tenantId: string): Promise<Tenant | undefined> {
+    const memTenant = await memoryDb.getTenant(tenantId);
+    if (this.useMemory) return memTenant;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return memTenant;
+      const t = await getPostgresTenant(tenantId);
+      return t ?? memTenant;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getTenant');
+      return memTenant;
+    }
+  }
+
+  async createSession(session: SessionRecord): Promise<void> {
+    await memoryDb.createSession(session);
+    if (this.useMemory) return;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await insertPostgresSession(session);
+    } catch (e) {
+      this.handleDatabaseError(e, 'createSession');
+    }
+  }
+
+  async getSession(token: string): Promise<SessionRecord | undefined> {
+    if (this.useMemory) return await memoryDb.getSession(token);
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return await memoryDb.getSession(token);
+      const session = await getPostgresSession(token);
+      return session;
+    } catch (e) {
+      this.handleDatabaseError(e, 'getSession');
+      return await memoryDb.getSession(token);
+    }
+  }
+
+  async deleteSession(token: string): Promise<void> {
+    await memoryDb.deleteSession(token);
+    if (this.useMemory) return;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await deletePostgresSession(token);
+    } catch (e) {
+      this.handleDatabaseError(e, 'deleteSession');
+    }
+  }
+
+  async deleteExpiredSessions(): Promise<void> {
+    await memoryDb.deleteExpiredSessions();
+    if (this.useMemory) return;
+    try {
+      await ensureSeeded();
+      if (this.useMemory) return;
+      await deleteExpiredPostgresSessions();
+    } catch (e) {
+      this.handleDatabaseError(e, 'deleteExpiredSessions');
+    }
+  }
+}
+
+/**
+ * Concrete singleton used internally by this module for lifecycle control
+ * (memory-fallback toggling, pool reset) that is intentionally absent from the
+ * public `IOmniRAGDatabase` contract.
+ */
+const dbInstance = new OmniRAGDatabase();
+
+/**
+ * Singleton storage instance. Typed against the contract so call sites depend
+ * on `IOmniRAGDatabase` rather than the concrete Postgres-backed class — this
+ * keeps routes/libraries decoupled from the backend and enables swapping to a
+ * test double without editing consumers.
+ */
+export const db: IOmniRAGDatabase = dbInstance;

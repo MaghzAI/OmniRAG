@@ -1,6 +1,39 @@
-@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@300;400;500;600;700&family=Cairo:wght@400;600;700&family=Tajawal:wght@400;500;700&family=Amiri:ital,wght@0,400;0,700;1,400&display=swap');
+@import 'tailwindcss';
+/* KaTeX4Arabic rendering styles (RTL math, Arabic operator names, mirroring).
+   Loaded after tailwind so its `.katex-arabic` rules win over preflight. */
+@import 'katex4arabic/katex-arabic.css';
+
+/* Register the Arabic font families as Tailwind v4 theme tokens so the
+   `font-arabic`, `font-cairo` and `font-tajawal` utilities exist. They read
+   the live `--font-arabic` variable, which the preferences store overrides
+   via html[data-arabic-font]. */
+@theme {
+  --font-arabic: 'IBM Plex Sans Arabic', 'Cairo', system-ui, -apple-system, sans-serif;
+  --font-cairo: 'Cairo', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+  --font-tajawal: 'Tajawal', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+
+  /* Extra slate steps used across the UI (`border-slate-150`, `bg-slate-850`).
+     Tailwind v4 ships neither shade, so every usage previously generated NO
+     CSS and those borders/backgrounds silently rendered unstyled. Defining
+     them here fixes all ~28 call sites at once. */
+  --color-slate-150: #e9eef5;
+  --color-slate-850: #172033;
+}
+
+/* Tailwind v4 is CSS-first and has no tailwind.config.js by default, so the
+   `dark:` variant defaults to `@media (prefers-color-scheme: dark)` only —
+   i.e. it follows the OS setting and cannot be toggled by the app. The project
+   uses `dark:` in 60+ places against a fixed light theme, so dark styling
+   only kicked in for users whose OS was set to dark, producing an inconsistent
+   look. Re-define the variant as a class selector (`.dark`) so dark mode is
+   application-controlled and deterministic regardless of the OS preference. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+  color-scheme: light;
+  --font-arabic: 'IBM Plex Sans Arabic', 'Cairo', system-ui, -apple-system, sans-serif;
+  --font-math-arabic: 'Amiri', 'Scheherazade New', 'Noto Naskh Arabic', 'Cairo', serif;
   --bg-primary: #f8fafc;
   --text-primary: #0f172a;
 }
@@ -8,9 +41,718 @@
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  font-family: var(--font-arabic);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Brand-tinted text selection in both themes. */
+::selection {
+  background: rgb(99 102 241 / 0.18);
+}
+.dark ::selection {
+  background: rgb(129 140 248 / 0.32);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Global user preferences — applied automatically from the preferences
+   store (src/lib/preferences/userPreferences.ts). The store writes
+   data-* attributes and the .dark class onto <html>; these rules turn
+   them into real styling across the entire application.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Arabic font family (Settings → Appearance → Arabic Font) ─────────── */
+html[data-arabic-font='cairo'] {
+  --font-arabic: 'Cairo', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+}
+html[data-arabic-font='tajawal'] {
+  --font-arabic: 'Tajawal', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+}
+html[data-arabic-font='ibm'] {
+  --font-arabic: 'IBM Plex Sans Arabic', 'Cairo', system-ui, sans-serif;
+}
+
+/* ── Global text size (Settings → Appearance → Text Sizing) ─────────────
+   Scaling the root font-size proportionally rescales every rem-based
+   Tailwind utility (text sizes, spacing), giving a consistent global zoom. */
+html[data-font-size='sm'] {
+  font-size: 14.5px;
+}
+html[data-font-size='md'] {
+  font-size: 16px;
+}
+html[data-font-size='lg'] {
+  font-size: 18px;
+}
+
+/* ── Display density (Settings → Appearance → Density) ──────────────────
+   Tightens the vertical rhythm of the chat message stream. */
+html[data-density='compact'] .space-y-5 > :not(:last-child) {
+  margin-block-end: 0.625rem;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME (class-based, toggled by the preferences store)
+   ────────────────────────────────────────────────────────────────────────
+   A calm, low-glare palette built on deep blue-slate instead of pure
+   black, organized as an elevation ladder so every surface keeps its
+   relative depth from the light theme:
+
+     base     #0b1120   page background
+     inset    #101a2c   recessed sections        (was bg-slate-50)
+     card     #151d2e   cards & panels           (was bg-white)
+     raised   #1c2740   nested content, thead    (was bg-slate-100)
+     overlay  #2c3d56   controls & chips         (was bg-slate-200)
+     hover    #223049   interactive hover lift
+
+   Surfaces that are deliberately dark in the light theme too (app header,
+   code blocks, fullscreen bar — slate-700…950) are left untouched, as are
+   white overlays that sit on colored surfaces (bg-white/20, /90).
+   Unlayered rules intentionally override Tailwind's layered utilities so
+   the whole app restyles without touching any component.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1 · Design tokens ────────────────────────────────────────────────── */
+.dark {
+  color-scheme: dark;
+  background-color: #0b1120;
+  --bg-primary: #0b1120;
+  --text-primary: #e2e8f0;
+  --surface-base: #0b1120;
+  --surface-inset: #101a2c;
+  --surface-card: #151d2e;
+  --surface-raised: #1c2740;
+  --surface-overlay: #2c3d56;
+  --surface-hover: #223049;
+  --border-subtle: rgb(148 163 184 / 0.1);
+  --border-default: rgb(148 163 184 / 0.16);
+  --border-strong: rgb(148 163 184 / 0.28);
+  --text-heading: #f1f5f9;
+  --text-body: #e2e8f0;
+  --text-secondary: #b6c2d6;
+  --text-muted: #94a3b8;
+  --text-faint: #8494ac;
+}
+.dark body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ── 2 · Surfaces ─────────────────────────────────────────────────────── */
+.dark .bg-slate-50,
+.dark .bg-slate-50\/30,
+.dark .bg-slate-50\/40,
+.dark .bg-slate-50\/50,
+.dark .bg-slate-50\/60,
+.dark .bg-slate-50\/70,
+.dark .bg-slate-50\/80 {
+  background-color: var(--surface-inset);
+}
+.dark .bg-white {
+  background-color: var(--surface-card);
+}
+.dark .bg-white\/60,
+.dark .bg-white\/80 {
+  background-color: rgb(21 29 46 / 0.82);
+}
+.dark .bg-white\/90,
+.dark .bg-white\/95 {
+  background-color: var(--surface-raised);
+}
+/* Exception: the active-conversation indicator bar sits on an indigo-600
+   surface and must stay white in both themes. */
+.dark .bg-indigo-600 .bg-white\/90 {
+  background-color: rgb(255 255 255 / 0.9);
+}
+.dark .hover\:bg-white:hover {
+  background-color: var(--surface-hover);
+}
+.dark .bg-slate-100,
+.dark .bg-slate-100\/50,
+.dark .bg-slate-100\/60,
+.dark .bg-slate-100\/80 {
+  background-color: var(--surface-raised);
+}
+.dark .bg-slate-200,
+.dark .bg-slate-200\/60,
+.dark .bg-slate-200\/70,
+.dark .bg-slate-200\/80 {
+  background-color: var(--surface-overlay);
+}
+/* Status dots & small indicators — brightened to stay visible. */
+.dark .bg-slate-300 {
+  background-color: #475569;
+}
+.dark .bg-slate-400,
+.dark .bg-slate-400\/70 {
+  background-color: #64748b;
+}
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-50\/40:hover,
+.dark .hover\:bg-slate-50\/60:hover,
+.dark .hover\:bg-slate-50\/80:hover,
+.dark .hover\:bg-slate-100:hover,
+.dark .hover\:bg-slate-100\/50:hover,
+.dark .hover\:bg-slate-200:hover,
+.dark .hover\:bg-slate-200\/70:hover,
+.dark .hover\:bg-slate-200\/80:hover {
+  background-color: var(--surface-hover);
+}
+.dark .hover\:bg-slate-300:hover {
+  background-color: #354761;
+}
+
+/* ── 3 · Accent tints (pastel light backgrounds → translucent glows) ──── */
+.dark .bg-indigo-50,
+.dark .bg-indigo-50\/20,
+.dark .bg-indigo-50\/40,
+.dark .bg-indigo-50\/50,
+.dark .bg-indigo-50\/60,
+.dark .bg-indigo-50\/70,
+.dark .bg-indigo-50\/80,
+.dark .bg-indigo-50\/90 {
+  background-color: rgb(99 102 241 / 0.12);
+}
+.dark .bg-indigo-100 {
+  background-color: rgb(99 102 241 / 0.18);
+}
+.dark .bg-indigo-200,
+.dark .bg-indigo-200\/50 {
+  background-color: rgb(99 102 241 / 0.26);
+}
+.dark .hover\:bg-indigo-50:hover,
+.dark .hover\:bg-indigo-50\/40:hover,
+.dark .hover\:bg-indigo-50\/70:hover,
+.dark .hover\:bg-indigo-50\/90:hover,
+.dark .hover\:bg-indigo-100:hover {
+  background-color: rgb(99 102 241 / 0.18);
+}
+.dark .hover\:bg-indigo-200:hover {
+  background-color: rgb(99 102 241 / 0.26);
+}
+.dark .bg-emerald-50,
+.dark .bg-emerald-50\/40,
+.dark .bg-emerald-50\/50,
+.dark .bg-emerald-50\/60,
+.dark .bg-emerald-50\/70,
+.dark .bg-emerald-50\/80,
+.dark .bg-emerald-50\/90 {
+  background-color: rgb(16 185 129 / 0.12);
+}
+.dark .bg-emerald-100 {
+  background-color: rgb(16 185 129 / 0.18);
+}
+.dark .bg-emerald-200,
+.dark .bg-emerald-200\/50,
+.dark .bg-emerald-200\/60 {
+  background-color: rgb(16 185 129 / 0.26);
+}
+.dark .bg-rose-50,
+.dark .bg-rose-50\/50,
+.dark .bg-rose-50\/60,
+.dark .bg-rose-50\/80 {
+  background-color: rgb(244 63 94 / 0.12);
+}
+.dark .bg-rose-100 {
+  background-color: rgb(244 63 94 / 0.18);
+}
+.dark .bg-rose-200 {
+  background-color: rgb(244 63 94 / 0.26);
+}
+.dark .bg-amber-50,
+.dark .bg-amber-50\/50,
+.dark .bg-amber-50\/60,
+.dark .bg-amber-50\/80 {
+  background-color: rgb(245 158 11 / 0.12);
+}
+.dark .bg-amber-100 {
+  background-color: rgb(245 158 11 / 0.18);
+}
+.dark .bg-amber-200 {
+  background-color: rgb(245 158 11 / 0.26);
+}
+.dark .bg-blue-50,
+.dark .bg-blue-50\/50,
+.dark .bg-blue-50\/60,
+.dark .bg-blue-50\/70 {
+  background-color: rgb(59 130 246 / 0.12);
+}
+.dark .bg-violet-50,
+.dark .bg-violet-50\/60 {
+  background-color: rgb(139 92 246 / 0.13);
+}
+.dark .bg-violet-100 {
+  background-color: rgb(139 92 246 / 0.2);
+}
+.dark .bg-cyan-50,
+.dark .bg-cyan-50\/60 {
+  background-color: rgb(6 182 212 / 0.12);
+}
+.dark .bg-purple-50,
+.dark .bg-purple-50\/60 {
+  background-color: rgb(168 85 247 / 0.12);
+}
+.dark .bg-teal-50 {
+  background-color: rgb(20 184 166 / 0.12);
+}
+.dark .bg-teal-100 {
+  background-color: rgb(20 184 166 / 0.18);
+}
+
+/* ── 4 · Borders ──────────────────────────────────────────────────────── */
+.dark .border-slate-50 {
+  border-color: var(--border-subtle);
+}
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-200\/60,
+.dark .border-slate-200\/80 {
+  border-color: var(--border-default);
+}
+.dark .border-slate-300 {
+  border-color: var(--border-strong);
+}
+.dark .hover\:border-slate-300:hover {
+  border-color: #475569;
+}
+.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+.dark .divide-slate-150 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--border-subtle);
+}
+.dark .border-indigo-100 {
+  border-color: rgb(99 102 241 / 0.22);
+}
+.dark .border-indigo-200,
+.dark .border-indigo-200\/80 {
+  border-color: rgb(99 102 241 / 0.32);
+}
+.dark .border-indigo-300 {
+  border-color: rgb(99 102 241 / 0.44);
+}
+.dark .hover\:border-indigo-200:hover {
+  border-color: rgb(129 140 248 / 0.42);
+}
+.dark .hover\:border-indigo-300:hover {
+  border-color: rgb(129 140 248 / 0.52);
+}
+.dark .border-emerald-100 {
+  border-color: rgb(16 185 129 / 0.22);
+}
+.dark .border-emerald-200 {
+  border-color: rgb(16 185 129 / 0.32);
+}
+.dark .hover\:border-emerald-200:hover,
+.dark .hover\:border-emerald-300:hover {
+  border-color: rgb(52 211 153 / 0.45);
+}
+.dark .border-rose-100 {
+  border-color: rgb(244 63 94 / 0.22);
+}
+.dark .border-rose-200 {
+  border-color: rgb(244 63 94 / 0.32);
+}
+.dark .border-rose-300 {
+  border-color: rgb(244 63 94 / 0.44);
+}
+.dark .hover\:border-rose-200:hover {
+  border-color: rgb(251 113 133 / 0.45);
+}
+.dark .border-amber-200,
+.dark .border-amber-200\/80 {
+  border-color: rgb(245 158 11 / 0.32);
+}
+.dark .border-amber-300 {
+  border-color: rgb(245 158 11 / 0.44);
+}
+.dark .border-blue-100 {
+  border-color: rgb(59 130 246 / 0.22);
+}
+.dark .border-blue-200 {
+  border-color: rgb(59 130 246 / 0.32);
+}
+.dark .border-violet-100 {
+  border-color: rgb(139 92 246 / 0.22);
+}
+.dark .border-violet-200 {
+  border-color: rgb(139 92 246 / 0.32);
+}
+
+/* ── 5 · Text hierarchy ───────────────────────────────────────────────── */
+.dark .text-slate-950,
+.dark .text-slate-900 {
+  color: var(--text-heading);
+}
+.dark .text-slate-800 {
+  color: var(--text-body);
+}
+.dark .text-slate-700 {
+  color: #cbd5e1;
+}
+.dark .text-slate-600 {
+  color: var(--text-secondary);
+}
+.dark .text-slate-500 {
+  color: var(--text-muted);
+}
+.dark .text-slate-400 {
+  color: var(--text-faint);
+}
+.dark .hover\:text-slate-900:hover {
+  color: #f8fafc;
+}
+.dark .hover\:text-slate-800:hover {
+  color: var(--text-heading);
+}
+.dark .hover\:text-slate-700:hover {
+  color: var(--text-body);
+}
+.dark .hover\:text-slate-600:hover {
+  color: #cbd5e1;
+}
+.dark .placeholder\:text-slate-400::placeholder {
+  color: #5b6b82;
+}
+
+/* ── 6 · Accent text (deep light-mode hues → readable dark-mode hues) ── */
+.dark .text-indigo-950,
+.dark .text-indigo-900,
+.dark .hover\:text-indigo-950:hover,
+.dark .hover\:text-indigo-900:hover {
+  color: #c7d2fe;
+}
+.dark .text-indigo-800,
+.dark .text-indigo-700,
+.dark .hover\:text-indigo-800:hover,
+.dark .hover\:text-indigo-700:hover {
+  color: #a5b4fc;
+}
+.dark .text-indigo-600,
+.dark .hover\:text-indigo-600:hover {
+  color: #818cf8;
+}
+.dark .text-emerald-950,
+.dark .text-emerald-900 {
+  color: #a7f3d0;
+}
+.dark .text-emerald-800,
+.dark .text-emerald-700,
+.dark .hover\:text-emerald-700:hover {
+  color: #6ee7b7;
+}
+.dark .text-emerald-600 {
+  color: #34d399;
+}
+.dark .text-rose-950,
+.dark .text-rose-900 {
+  color: #fecdd3;
+}
+.dark .text-rose-800,
+.dark .text-rose-700,
+.dark .hover\:text-rose-800:hover,
+.dark .hover\:text-rose-700:hover {
+  color: #fda4af;
+}
+.dark .text-rose-600,
+.dark .hover\:text-rose-600:hover {
+  color: #fb7185;
+}
+.dark .text-amber-950,
+.dark .text-amber-900 {
+  color: #fde68a;
+}
+.dark .text-amber-800,
+.dark .text-amber-700 {
+  color: #fcd34d;
+}
+.dark .text-amber-600 {
+  color: #fbbf24;
+}
+.dark .text-blue-950 {
+  color: #bfdbfe;
+}
+.dark .text-blue-700,
+.dark .text-blue-600 {
+  color: #60a5fa;
+}
+.dark .text-violet-700,
+.dark .text-violet-600 {
+  color: #a78bfa;
+}
+
+/* ── 7 · Gradients that reference light surfaces ──────────────────────── */
+/* Input-bar fade under the composer. */
+.dark .bg-gradient-to-t.from-white {
+  background-image: linear-gradient(to top, var(--surface-base), rgb(11 17 32 / 0.72), transparent);
+}
+/* Markdown horizontal rule. */
+.dark .bg-gradient-to-r.from-transparent.via-slate-300 {
+  background-image: linear-gradient(to right, transparent, rgb(148 163 184 / 0.3), transparent);
+}
+
+/* ── 8 · Form controls ────────────────────────────────────────────────── */
+.dark textarea.bg-transparent,
+.dark input.bg-transparent {
+  color: var(--text-body);
+}
+
+/* ── 9 · Markdown, math & diagrams ────────────────────────────────────── */
+.dark .rich-markdown-body {
+  color: #cbd5e1;
+}
+.dark .rich-markdown-body h1,
+.dark .rich-markdown-body h2,
+.dark .rich-markdown-body h3,
+.dark .rich-markdown-body h4,
+.dark .rich-markdown-body h5,
+.dark .rich-markdown-body h6,
+.dark .rich-markdown-body strong,
+.dark .rich-markdown-body th {
+  color: var(--text-heading);
+}
+.dark .rich-markdown-body blockquote {
+  background-color: rgb(99 102 241 / 0.1);
+  color: #c7d2fe;
+}
+.dark .katex {
+  color: var(--text-body);
+}
+.dark .katex-arabic {
+  --ka-color: var(--text-body);
+}
+.dark .mermaid-container {
+  background-color: var(--surface-card);
+}
+.dark .mermaid-container svg {
+  background: transparent;
+}
+
+/* ── 10 · Rings (soft light rings → visible translucent rings) ─────────── */
+.dark .ring-indigo-100,
+.dark .ring-indigo-200 {
+  --tw-ring-color: rgb(129 140 248 / 0.35);
+}
+.dark .focus\:ring-indigo-100:focus {
+  --tw-ring-color: rgb(129 140 248 / 0.3);
+}
+.dark .ring-emerald-100 {
+  --tw-ring-color: rgb(52 211 153 / 0.3);
+}
+.dark .ring-violet-100 {
+  --tw-ring-color: rgb(167 139 250 / 0.3);
+}
+.dark .ring-rose-100 {
+  --tw-ring-color: rgb(251 113 133 / 0.3);
+}
+.dark .ring-slate-100,
+.dark .ring-slate-200 {
+  --tw-ring-color: rgb(148 163 184 / 0.18);
+}
+
+/* ── 11 · Scrollbars — brighter thumbs for contrast on dark surfaces ──── */
+.dark * {
+  scrollbar-color: rgb(148 163 184 / 0.22) transparent;
+}
+.dark *::-webkit-scrollbar-thumb {
+  background: rgb(148 163 184 / 0.22);
+}
+.dark *::-webkit-scrollbar-thumb:hover {
+  background: rgb(148 163 184 / 0.4);
+}
+.dark .lazy-scroll {
+  scrollbar-color: rgb(129 140 248 / 0.35) transparent;
+}
+.dark .lazy-scroll::-webkit-scrollbar-thumb {
+  background: rgb(129 140 248 / 0.35);
+}
+.dark .lazy-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(129 140 248 / 0.55);
+}
+
+/* ── PDF export — force light output even in dark mode ──────────────────
+   exportChatAsPdf() clones the `.print-chat-stream` into an off-screen
+   `.pdf-export-host` that still lives under `html.dark`. Without this block
+   the dark overrides above would bleed into the rasterized PDF. These
+   `!important` rules re-anchor the transcript to the light paper palette. */
+.pdf-export-host {
+  color-scheme: light;
+}
+.pdf-export-host .bg-white {
+  background-color: #ffffff !important;
+}
+.pdf-export-host .bg-slate-50,
+.pdf-export-host .bg-slate-100 {
+  background-color: #f8fafc !important;
+}
+.pdf-export-host .text-slate-950,
+.pdf-export-host .text-slate-900,
+.pdf-export-host .text-slate-800 {
+  color: #0f172a !important;
+}
+.pdf-export-host .text-slate-700 {
+  color: #334155 !important;
+}
+.pdf-export-host .text-slate-600 {
+  color: #475569 !important;
+}
+.pdf-export-host .text-slate-500,
+.pdf-export-host .text-slate-400 {
+  color: #64748b !important;
+}
+.pdf-export-host .border-slate-100,
+.pdf-export-host .border-slate-200,
+.pdf-export-host .border-slate-300 {
+  border-color: #e2e8f0 !important;
+}
+.pdf-export-host .rich-markdown-body {
+  color: #334155 !important;
+}
+.pdf-export-host .rich-markdown-body h1,
+.pdf-export-host .rich-markdown-body h2,
+.pdf-export-host .rich-markdown-body h3,
+.pdf-export-host .rich-markdown-body h4,
+.pdf-export-host .rich-markdown-body strong,
+.pdf-export-host .rich-markdown-body th {
+  color: #0f172a !important;
+}
+.pdf-export-host .katex {
+  color: #0f172a !important;
+}
+.pdf-export-host .katex-arabic {
+  --ka-color: #0f172a !important;
+}
+/* Accent tints return to their light pastels; accent text to deep hues. */
+.pdf-export-host .bg-indigo-50 {
+  background-color: #eef2ff !important;
+}
+.pdf-export-host .bg-emerald-50 {
+  background-color: #ecfdf5 !important;
+}
+.pdf-export-host .bg-rose-50 {
+  background-color: #fff1f2 !important;
+}
+.pdf-export-host .bg-amber-50 {
+  background-color: #fffbeb !important;
+}
+.pdf-export-host .text-indigo-600,
+.pdf-export-host .text-indigo-700 {
+  color: #4f46e5 !important;
+}
+.pdf-export-host .text-emerald-600,
+.pdf-export-host .text-emerald-700 {
+  color: #059669 !important;
+}
+.pdf-export-host .text-rose-600,
+.pdf-export-host .text-rose-700 {
+  color: #e11d48 !important;
+}
+.pdf-export-host .text-amber-600,
+.pdf-export-host .text-amber-700 {
+  color: #d97706 !important;
+}
+
+/* ── Chat transcript zoom (fullscreen "تكبير الخط") ─────────────────────
+   Uses the CSS `zoom` property so the whole message region — including
+   rem-based Tailwind text, math, code and tables — scales together.
+   `zoom` is supported in all evergreen browsers (Firefox 126+). */
+.chat-stream-zoom[data-zoom='1'] {
+  zoom: 1.12;
+}
+.chat-stream-zoom[data-zoom='2'] {
+  zoom: 1.25;
+}
+.chat-stream-zoom[data-zoom='3'] {
+  zoom: 1.4;
+}
+
+/* ── Print styles — clean transcript output for Print & Export-as-PDF ───
+   Hides all app chrome and prints only the message stream on white paper,
+   forcing light colors even when dark mode is active. */
+@media print {
+  @page {
+    margin: 14mm;
+  }
+  body {
+    background: #fff !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  /* Let the message stream flow across pages instead of scrolling. */
+  .print-chat-stream {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    padding: 0 !important;
+  }
+  /* Flatten the layout so the transcript occupies the full page width. */
+  .print-expand {
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+  /* react-resizable-panels containers must stop constraining height. */
+  [data-group],
+  [data-panel] {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  [data-separator] {
+    display: none !important;
+  }
+  /* Ink-friendly message bubbles. In print the layout becomes document-like:
+     bubbles span the full printable width and follow the page size — wider
+     paper gives wider bubbles, narrower paper shrinks them. */
+  .print-chat-stream .rounded-2xl {
+    max-width: 100% !important;
+    box-shadow: none !important;
+    border: 1px solid #e2e8f0 !important;
+    background: #fff !important;
+    break-inside: avoid;
+  }
+  .print-chat-stream .text-slate-800,
+  .print-chat-stream .text-slate-900,
+  .print-chat-stream .rich-markdown-body {
+    color: #0f172a !important;
+  }
+  /* Re-anchor every other surface/text tier to the light palette so a dark
+     session still prints as a clean light document. */
+  .print-chat-stream .bg-white {
+    background: #fff !important;
+  }
+  .print-chat-stream .bg-slate-50,
+  .print-chat-stream .bg-slate-100 {
+    background: #f8fafc !important;
+  }
+  .print-chat-stream .text-slate-950 {
+    color: #0f172a !important;
+  }
+  .print-chat-stream .text-slate-700 {
+    color: #334155 !important;
+  }
+  .print-chat-stream .text-slate-600 {
+    color: #475569 !important;
+  }
+  .print-chat-stream .text-slate-500,
+  .print-chat-stream .text-slate-400 {
+    color: #64748b !important;
+  }
+  .print-chat-stream .border-slate-100,
+  .print-chat-stream .border-slate-200,
+  .print-chat-stream .border-slate-300 {
+    border-color: #e2e8f0 !important;
+  }
+  /* Force light math colors for paper. */
+  .print-chat-stream .katex,
+  .print-chat-stream .katex-arabic {
+    color: #0f172a !important;
+  }
+  /* Hide the header, footer and side panels regardless of .no-print. */
+  header,
+  footer {
+    display: none !important;
+  }
 }
 
 .no-scrollbar::-webkit-scrollbar {
@@ -21,3 +763,391 @@ body {
   scrollbar-width: none;
 }
 
+/* Arabic Math Font & Notation Styles */
+.arabic-math-formula {
+  font-family: 'Amiri', 'Traditional Arabic', serif;
+  direction: rtl;
+  font-size: 1.15em;
+  line-height: 1.6;
+}
+
+/* Focus Indicators & Accessibility */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* === Chat UI Animations & Polish === */
+
+/* Generic fade-in used by tooltips, modals and floating bars. */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.18s ease-out both;
+}
+
+/* Toast notifications: slide up on enter, fade down on exit. */
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.toast-enter {
+  animation: toast-enter 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes toast-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+.toast-exit {
+  animation: toast-exit 0.2s ease-in both;
+}
+
+/* Modal panels: gentle scale + fade so dialogs don't "pop" harshly. */
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.modal-enter {
+  animation: modal-enter 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* tailwindcss-animate-compatible enter utilities. 13 components use
+   `animate-in fade-in zoom-in-95 duration-*` classes, but the plugin was never
+   installed, so every modal rendered WITHOUT its entrance animation. These
+   rules implement the same contract (enter opacity/scale/translate driven by
+   CSS variables) without adding a dependency. */
+@keyframes tw-enter {
+  from {
+    opacity: var(--tw-enter-opacity, 1);
+    transform: translateY(var(--tw-enter-translate-y, 0)) scale(var(--tw-enter-scale, 1));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-in {
+  animation: tw-enter 150ms ease-out both;
+}
+.animate-in.duration-150 {
+  animation-duration: 150ms;
+}
+.animate-in.duration-200 {
+  animation-duration: 200ms;
+}
+.fade-in {
+  --tw-enter-opacity: 0;
+}
+.fade-in-50 {
+  --tw-enter-opacity: 0.5;
+}
+.zoom-in-95 {
+  --tw-enter-scale: 0.95;
+}
+.slide-in-from-top-3 {
+  --tw-enter-translate-y: -0.75rem;
+}
+
+/* Message appear animation */
+@keyframes message-appear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-message-appear {
+  animation: message-appear 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Citation popover pop animation */
+@keyframes citation-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+.animate-citation-pop {
+  transform-origin: bottom center;
+  animation: citation-pop 0.2s ease-out both;
+}
+
+/* Citations dropdown animation */
+@keyframes citation-dropdown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-citation-dropdown {
+  transform-origin: top center;
+  animation: citation-dropdown 0.2s ease-out both;
+}
+
+/* Typing dots animation */
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+.animate-typing-dot {
+  animation: typing-dot 1.2s infinite ease-in-out;
+}
+
+/* Improved Arabic typography for chat messages */
+.rich-markdown-body {
+  letter-spacing: 0.005em;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+[dir='rtl'] .rich-markdown-body {
+  text-align: right;
+}
+
+[dir='ltr'] .rich-markdown-body {
+  text-align: left;
+}
+
+/* Custom scrollbars — thin, soft slate-indigo thumbs that stay visible
+   without stealing attention. Applied to chat areas and, via the generic
+   rules below, to every scrollable surface in the app. */
+.lazy-scroll {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.35) transparent;
+}
+.lazy-scroll::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+.lazy-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.lazy-scroll::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.35);
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  background-clip: content-box;
+}
+.lazy-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(79, 70, 229, 0.55);
+  background-clip: content-box;
+}
+
+/* Consistent thin scrollbars everywhere else (panels, modals, code blocks). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
+
+/* Scale hover utility for interactive elements */
+.hover\:scale-102:hover {
+  transform: scale(1.02);
+}
+@media (hover: hover) {
+  .hover\:scale-102:hover {
+    transform: scale(1.02);
+  }
+}
+
+/* === Resizable Panel Handle === */
+.panel-resize-handle {
+  width: 4px;
+  background: rgba(99, 102, 241, 0.08);
+  cursor: col-resize;
+  position: relative;
+  flex-shrink: 0;
+  transition:
+    background 0.2s ease,
+    width 0.2s ease;
+}
+.panel-resize-handle:hover {
+  background: rgba(99, 102, 241, 0.28);
+}
+.panel-resize-handle[data-resize-handle-state='hover'],
+.panel-resize-handle[data-resize-handle-state='drag'] {
+  background: rgba(99, 102, 241, 0.45);
+  width: 6px;
+}
+.panel-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 24px;
+  background: rgba(99, 102, 241, 0.35);
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.panel-resize-handle:hover::before,
+.panel-resize-handle[data-resize-handle-state='drag']::before {
+  opacity: 1;
+}
+[dir='rtl'] .panel-resize-handle {
+  cursor: col-resize;
+}
+
+/* === Mermaid diagram container === */
+.mermaid-container svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+/* === Code block breakouts in markdown === */
+.rich-markdown-body pre {
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+}
+.rich-markdown-body .rehype-katex {
+  display: inline-block;
+}
+
+/* === KaTeX math polish === */
+/* Display math ($$...$$) gets its own scrollable row so wide equations never
+   break the bubble layout, and stays LTR even inside RTL Arabic content. */
+.rich-markdown-body .katex-display {
+  direction: ltr;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0.25rem;
+  scrollbar-width: thin;
+}
+.rich-markdown-body .katex-display::-webkit-scrollbar {
+  height: 5px;
+}
+.rich-markdown-body .katex-display::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.25);
+  border-radius: 9999px;
+}
+/* Inline math should sit comfortably on the text baseline. */
+.rich-markdown-body .katex {
+  font-size: 1.05em;
+}
+.rich-markdown-body .katex-display > .katex {
+  font-size: 1.15em;
+}
+
+/* === KaTeX4Arabic polish ===
+   Display-mode Arabic equations get breathing room and a horizontal escape
+   hatch for very wide formulas, mirroring the standard KaTeX treatment. */
+.rich-markdown-body .katex-arabic.is-display {
+  margin: 0.75em 0;
+  padding: 0.5rem 0.25rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.rich-markdown-body .katex-arabic.is-display::-webkit-scrollbar {
+  height: 5px;
+}
+.rich-markdown-body .katex-arabic.is-display::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.25);
+  border-radius: 9999px;
+}
+.rich-markdown-body .katex-arabic.is-inline {
+  vertical-align: -0.2em;
+}
+/* Failed formulas stay readable and clearly marked. */
+.rich-markdown-body .katex-arabic--error {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px dashed rgba(239, 68, 68, 0.4);
+  border-radius: 0.5rem;
+  padding: 0.15rem 0.5rem;
+}
+
+/* === GFM Task list checkbox polish === */
+.rich-markdown-body li.task-list-item {
+  list-style: none;
+  margin-left: -1.5rem;
+}
+[dir='rtl'] .rich-markdown-body li.task-list-item {
+  margin-left: 0;
+  margin-right: -1.5rem;
+}
+
+/* === Image auto-embed in markdown body === */
+.rich-markdown-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+
+/* === Smooth fullscreen overlay === */
+@keyframes chat-fs-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.fixed.inset-0.z-40 {
+  animation: chat-fs-enter 0.18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}

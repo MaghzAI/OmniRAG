@@ -23,6 +23,45 @@ export interface TenantSettings {
 
 export type ChatMode = 'private' | 'hybrid' | 'general' | 'analysis';
 
+/**
+ * Auth account (Postgres-only — replaces Firebase Auth). The password hash is
+ * stored exclusively on the server; `User` never reaches the client. Each user
+ * belongs to exactly one tenant (single-tenant-at-signup model) — `tenantId`
+ * is explicit data, reconstructed at login rather than derived by convention.
+ */
+export interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
+  tenantId: string;
+  createdAt: string;
+}
+
+/**
+ * A persisted session row. `token` is an opaque random value (never a JWT),
+ * looked up verbatim against the `sessions` table to authorize requests.
+ */
+export interface SessionRecord {
+  token: string;
+  userId: string;
+  tenantId: string;
+  expiresAt: string; // ISO timestamp
+  createdAt: string;
+}
+
+export interface DocumentVersion {
+  id: string;
+  documentId: string;
+  versionNumber: number;
+  title: string;
+  content: string;
+  chunkCount: number;
+  createdAt: string;
+  createdBy?: string;
+  changeSummary?: string;
+  metadata?: Record<string, any>;
+}
+
 export interface Document {
   id: string;
   tenantId: TenantId;
@@ -33,8 +72,11 @@ export interface Document {
   status: 'pending' | 'processing' | 'indexed' | 'failed';
   chunkCount: number;
   createdAt: string;
+  updatedAt?: string;
   metadata: Record<string, any>;
   collectionIds?: string[];
+  version?: number;
+  versions?: DocumentVersion[];
 }
 
 export interface DocumentChunk {
@@ -50,6 +92,26 @@ export interface DocumentChunk {
   lexicalScore?: number;
   language: 'ar' | 'en';
   metadata?: Record<string, any>;
+}
+
+/**
+ * Structured outcome of a batch chunk-indexing operation. Previously the
+ * ingestion path swallowed embedding/Qdrant errors and always reported success,
+ * so a document could show "indexed" while having zero searchable vectors.
+ * Callers now receive explicit counts and can flip the document status to
+ * `failed` (or `indexed` with a warning) accordingly.
+ */
+export interface ChunkIndexResult {
+  /** Number of chunks that successfully reached the vector store. */
+  indexed: number;
+  /** Number of chunks that failed embedding or vector upsert. */
+  failed: number;
+  /** Total chunks attempted. */
+  total: number;
+  /** Human-readable failure reasons (empty when fully successful). */
+  errors: string[];
+  /** True when every chunk was indexed successfully. */
+  success: boolean;
 }
 
 export interface Collection {
@@ -71,6 +133,8 @@ export interface Conversation {
   enabledMcpServers: string[];
   createdAt: string;
   updatedAt: string;
+  /** Preview of the first user request in this conversation (list views). */
+  firstUserMessage?: string;
 }
 
 export interface Citation {
@@ -81,6 +145,8 @@ export interface Citation {
   pageNumber?: number;
   score: number;
   snippet: string;
+  /** Direct URL to the source document (external link or in-app deep link) */
+  sourceUrl?: string;
 }
 
 export interface Message {
@@ -116,6 +182,13 @@ export interface MCPServerConfig {
   status: 'healthy' | 'degraded' | 'down';
   latencyMs: number;
   lastChecked: string;
+  headers?: Record<string, string>;
+  category?: string;
+  url?: string;
+  authType?: 'none' | 'basic' | 'bearer' | 'oauth2';
+  transportType?: 'http' | 'sse' | 'stdio' | 'websocket';
+  config?: Record<string, any>;
+  customToolSchemas?: Record<string, any>;
 }
 
 export interface MCPToolDefinition {
@@ -175,7 +248,14 @@ export interface SourceConnector {
   name: string;
   type: SourceType;
   status: SourceStatus;
+  /**
+   * Connector configuration. Credential-bearing keys (apiKey, token, password,
+   * secret, connectionString) are stored AES-256-GCM encrypted at rest via
+   * {@link encryptSourceConfig}; decrypted lazily for sync execution only.
+   */
   config: Record<string, any>;
+  /** Set true once {@link config} has been encrypted at rest. */
+  configEncrypted?: boolean;
   syncSchedule: string; // Cron e.g. "0 */6 * * *" or "manual"
   lastSyncAt?: string;
   nextSyncAt?: string;

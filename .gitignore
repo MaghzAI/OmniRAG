@@ -1,7 +1,18 @@
 node_modules/
-build/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+*.pem
+*.key
+*.p12
+terminal_logs/
+.next/
+.vscode/
+.husky
+.zcode/
+
+# TypeScript incremental build artifacts — must not be committed (stale
+# tsbuildinfo causes misleading CI typecheck results across machines).
+*.tsbuildinfo

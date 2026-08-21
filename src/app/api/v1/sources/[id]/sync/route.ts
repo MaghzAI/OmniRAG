@@ -1,19 +1,20 @@
+import { withAuthAndRateLimit } from '@/lib/api/withAuthAndRateLimit';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/storage/db';
+import { getEnv } from '@/lib/env/runtimeEnv';
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const POST = withAuthAndRateLimit(async (req, authCtx, { params }: { params: Promise<{ id: string }> }) => {
   const { id } = await params;
-  let tenantId = 'tenant-acme-01';
+  const tenantId = authCtx.tenantId;
 
-  try {
-    const body = await req.json().catch(() => ({}));
-    if (body.tenantId) tenantId = body.tenantId;
-  } catch (e) {
-    // Ignore JSON parse if empty body
-  }
+  // Load dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
 
   const source = await db.getSourceById(id, tenantId);
   if (!source) {
@@ -27,4 +28,4 @@ export async function POST(
     result,
     source: await db.getSourceById(id, tenantId),
   });
-}
+});

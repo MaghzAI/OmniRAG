@@ -1,78 +1,319 @@
+import { withAuthAndRateLimit } from '@/lib/api/withAuthAndRateLimit';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { db } from '@/lib/storage/db';
-import { Document, DocumentChunk } from '@/lib/types/omnirag';
+import { Document, DocumentChunk, SourceConnector, SourceType } from '@/lib/types/omnirag';
+import { getEnv } from '@/lib/env/runtimeEnv';
+import { serverErrorResponse } from '@/lib/api/safeError';
+import { chunkDocument, resolveChunkGeometry, estimateTokenCount } from '@/lib/rag/chunker';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest) {
-  const tenantId = req.nextUrl.searchParams.get('tenantId') || 'tenant-acme-01';
-  const docs = await db.getDocuments(tenantId);
-  return NextResponse.json({ documents: docs });
-}
+/**
+ * Request validation for document ingestion. Previously the body was
+ * destructured with zero validation: content had no size limit, `language`
+ * accepted anything, `collectionIds` could be a non-array, and
+ * `chunkingConfig` was passed straight into the chunker. All of that is now
+ * schema-checked with explicit, localized error messages.
+ */
+const MAX_CONTENT_CHARS = 4_000_000; // ~4M chars ≈ 10MB of UTF-8 text
 
-export async function POST(req: NextRequest) {
+const createDocumentSchema = z.object({
+  title: z.string().trim().min(1, 'عنوان المستند مطلوب').max(500, 'العنوان طويل جداً (الحد 500 حرف)'),
+  content: z
+    .string()
+    .min(1, 'محتوى المستند مطلوب')
+    .max(MAX_CONTENT_CHARS, 'المحتوى يتجاوز الحد الأقصى المسموح (4 ملايين حرف)'),
+  sourceType: z.string().optional(),
+  sourceId: z.string().optional(),
+  language: z.enum(['ar', 'en', 'auto']).default('ar'),
+  collectionIds: z.array(z.string().min(1)).max(50).default([]),
+  chunkingConfig: z
+    .object({
+      strategy: z.enum(['semantic', 'markdown', 'recursive']).optional(),
+      size: z.number().int().min(64).max(8192).optional(),
+      overlap: z.number().int().min(0).max(90).optional(),
+    })
+    .optional(),
+  sourceConfig: z.record(z.string(), z.any()).default({}),
+});
+
+const VALID_SOURCE_TYPES: SourceType[] = [
+  'file',
+  'url',
+  'rss',
+  'youtube',
+  'github',
+  'notion',
+  'gdrive',
+  'confluence',
+  'slack',
+  'email',
+  'database',
+  'api',
+];
+
+export const GET = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
+  try {
+    const tenantId = authCtx.tenantId;
+    const documentId = req.nextUrl.searchParams.get('documentId');
+
+    if (documentId) {
+      const allChunks = await db.getChunks(tenantId);
+      const docChunks = allChunks.filter((c) => c.documentId === documentId);
+      return NextResponse.json({ chunks: docChunks });
+    }
+
+    const docs = await db.getDocuments(tenantId);
+    return NextResponse.json({ documents: docs });
+  } catch (error: any) {
+    console.error('API Error in documents GET:', error);
+    return NextResponse.json(
+      {
+        documents: [],
+        chunks: [],
+        error: 'حدث خطأ داخلي في الخادم. يرجى المحاولة مرة أخرى لاحقاً.',
+        code: 'INTERNAL_ERROR',
+      },
+      { status: 500 },
+    );
+  }
+});
+
+export const POST = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
   try {
     const body = await req.json();
-    const tenantId = body.tenantId || 'tenant-acme-01';
-    const { title, content, language = 'ar', collectionIds = [] } = body;
+    const tenantId = authCtx.tenantId;
 
-    if (!title || !content) {
-      return NextResponse.json({ error: 'العنوان والمحتوى مطلوبان' }, { status: 400 });
+    const parsed = createDocumentSchema.safeParse(body);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      return NextResponse.json(
+        {
+          error: firstIssue?.message || 'بيانات المستند غير صالحة',
+          code: 'VALIDATION_ERROR',
+          issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+        },
+        { status: 400 },
+      );
+    }
+
+    const {
+      title,
+      content,
+      sourceType,
+      sourceId: providedSourceId,
+      language,
+      collectionIds,
+      chunkingConfig,
+      sourceConfig,
+    } = parsed.data;
+
+    // Verify referenced collections actually exist for this tenant instead of
+    // silently accepting dangling ids that would later filter out every chunk.
+    if (collectionIds.length > 0) {
+      const existingCols = await db.getCollections(tenantId);
+      const existingIds = new Set(existingCols.map((c) => c.id));
+      const missing = collectionIds.filter((id) => !existingIds.has(id));
+      if (missing.length > 0) {
+        return NextResponse.json(
+          {
+            error: `مجموعات غير موجودة: ${missing.join('، ')}`,
+            code: 'UNKNOWN_COLLECTIONS',
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    const ingestionStartedAt = Date.now();
+
+    // Ensure a Source Connector exists or is created for this ingested document
+    let sourceId = providedSourceId;
+    let sourceObj: SourceConnector | undefined;
+
+    if (sourceId) {
+      sourceObj = await db.getSourceById(sourceId, tenantId);
+      if (sourceObj) {
+        await db.updateSource(
+          sourceId,
+          {
+            documentCount: (sourceObj.documentCount || 0) + 1,
+            lastSyncAt: new Date().toISOString(),
+            status: 'healthy',
+          },
+          tenantId,
+        );
+      }
+    }
+
+    if (!sourceObj) {
+      const validSourceType: SourceType = VALID_SOURCE_TYPES.includes(sourceType as SourceType)
+        ? (sourceType as SourceType)
+        : 'file';
+
+      sourceId = `src-${validSourceType}-${Date.now().toString().slice(-6)}`;
+      sourceObj = {
+        id: sourceId,
+        tenantId,
+        name: title,
+        type: validSourceType,
+        status: 'healthy',
+        config: sourceConfig,
+        syncSchedule: 'manual',
+        lastSyncAt: new Date().toISOString(),
+        documentCount: 1,
+        collectionIds,
+        createdAt: new Date().toISOString(),
+      };
+      await db.addSource(sourceObj);
     }
 
     const docId = `doc-${Date.now()}`;
+    const nowIso = new Date().toISOString();
     const newDoc: Document = {
       id: docId,
       tenantId,
       title,
       content,
-      sourceType: 'file',
+      sourceType: sourceObj.type === 'file' ? 'file' : 'integration',
       language,
-      status: 'indexed',
+      // Status lifecycle: the document starts as `processing` and only becomes
+      // `indexed` after the vector store confirms the upsert (or `failed`).
+      status: 'processing',
       chunkCount: 0,
-      createdAt: new Date().toISOString(),
-      metadata: { source: 'User Upload' },
+      version: 1,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      metadata: {
+        sourceId: sourceObj.id,
+        sourceName: sourceObj.name,
+        sourceType: sourceObj.type,
+        chunkingConfig,
+      },
       collectionIds,
+      versions: [
+        {
+          id: `ver-${docId}-v1`,
+          documentId: docId,
+          versionNumber: 1,
+          title,
+          content,
+          chunkCount: 0,
+          createdAt: nowIso,
+          createdBy: 'Ingestion Pipeline',
+          changeSummary: 'الإصدار الأصلي المستوعب في قاعدة المعرفة',
+        },
+      ],
     };
 
-    // Auto-chunking logic (500 chars per chunk)
-    const chunkSize = 400;
-    const chunkTextList: string[] = [];
-    for (let i = 0; i < content.length; i += chunkSize) {
-      chunkTextList.push(content.substring(i, i + chunkSize));
-    }
+    // Unified chunking — all ingestion paths go through chunkDocument so the
+    // same document always produces the same chunk grid regardless of route.
+    // Geometry (size/overlap/strategy) is validated and clamped inside.
+    const chunkTextList = chunkDocument(content, chunkingConfig);
+    const geometry = resolveChunkGeometry(chunkingConfig);
+    const strategy = geometry.strategy;
 
     newDoc.chunkCount = chunkTextList.length;
     await db.addDocument(newDoc);
 
-    for (let index = 0; index < chunkTextList.length; index++) {
-      const text = chunkTextList[index];
-      const chunk: DocumentChunk = {
-        id: `chunk-${docId}-${index + 1}`,
-        tenantId,
-        documentId: docId,
-        documentTitle: title,
-        content: text,
-        chunkIndex: index,
-        pageNumber: 1,
-        language,
-        metadata: { position: index },
-      };
-      await db.addChunk(chunk);
-    }
+    // Chunks carry a concrete language ('ar'|'en'); 'auto' resolves to Arabic
+    // as the app's default content language.
+    const chunkLanguage: DocumentChunk['language'] = language === 'en' ? 'en' : 'ar';
 
-    return NextResponse.json({ success: true, document: newDoc }, { status: 201 });
+    const chunks: DocumentChunk[] = chunkTextList.map((text, index) => ({
+      id: `chunk-${docId}-${index + 1}`,
+      tenantId,
+      documentId: docId,
+      documentTitle: title,
+      content: text,
+      chunkIndex: index,
+      pageNumber: 1,
+      language: chunkLanguage,
+      metadata: {
+        sourceId: sourceObj.id,
+        position: index,
+        strategy,
+        tokenCount: estimateTokenCount(text),
+      },
+    }));
+    const indexResult = await db.addChunks(chunks);
+
+    // Flip the document status based on the REAL indexing outcome and persist
+    // the failure reasons (if any) so the UI can surface them.
+    const finalStatus: Document['status'] = indexResult.success ? 'indexed' : 'failed';
+    newDoc.status = finalStatus;
+    newDoc.metadata = {
+      ...newDoc.metadata,
+      indexedAt: new Date().toISOString(),
+      indexErrors: indexResult.errors.length > 0 ? indexResult.errors : undefined,
+    };
+    await db.updateDocument(docId, { status: finalStatus, metadata: newDoc.metadata }, tenantId);
+
+    // Register sync log with the MEASURED duration for honest feedback.
+    const durationMs = Date.now() - ingestionStartedAt;
+    await db.addSyncLog({
+      id: `log-${Date.now()}`,
+      tenantId,
+      sourceId: sourceObj.id,
+      sourceName: sourceObj.name,
+      status: indexResult.success ? 'success' : 'failed',
+      itemsProcessed: chunkTextList.length,
+      durationMs,
+      message: indexResult.success
+        ? `تم استيعاب وتجزئة المستند "${title}" إلى ${chunkTextList.length} مقطع وفهرسته في قواعد المتجهات`
+        : `تم استيعاب "${title}" لكن الفهرسة المتجهية فشلت: ${indexResult.errors.join('؛ ')}`,
+      timestamp: new Date().toISOString(),
+    });
+
+    return NextResponse.json(
+      {
+        success: indexResult.success,
+        document: newDoc,
+        source: sourceObj,
+        chunkCount: chunkTextList.length,
+        indexing: indexResult,
+      },
+      { status: 201 },
+    );
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return serverErrorResponse('documents POST', err);
   }
-}
+});
 
-export async function DELETE(req: NextRequest) {
+export const DELETE = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
   const docId = req.nextUrl.searchParams.get('id');
-  const tenantId = req.nextUrl.searchParams.get('tenantId') || 'tenant-acme-01';
+  const tenantId = authCtx.tenantId;
 
   if (!docId) return NextResponse.json({ error: 'Missing document id' }, { status: 400 });
 
   await db.deleteDocument(docId, tenantId);
   return NextResponse.json({ success: true });
-}
+});

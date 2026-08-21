@@ -1,0 +1,71 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { withAuthAndRateLimit } from '@/lib/api/withAuthAndRateLimit';
+import { processMcpProtocolRequest } from '@/lib/mcp/server-factory';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+/**
+ * MCP Gateway Stateless Protocol Endpoint per SPEC 2026-07-28
+ * Supports GET, POST, DELETE with authenticated tenant isolation.
+ * Tenant identity is derived exclusively from the verified auth context.
+ */
+
+export const POST = withAuthAndRateLimit(async (req: NextRequest, authCtx, props) => {
+  try {
+    const tenantId = authCtx.tenantId;
+    const userId = authCtx.userId;
+
+    const body = await req.json();
+
+    const response = await processMcpProtocolRequest(body, {
+      tenantId,
+      userId,
+    });
+
+    return NextResponse.json(response, {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-MCP-Protocol-Version': '2026-07-28',
+      },
+    });
+  } catch (err: any) {
+    console.error('[api/mcp/[...path]] POST error:', err);
+    return NextResponse.json(
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        error: {
+          code: -32603,
+          message: 'خطأ غير متوقع في خادم MCP Gateway',
+        },
+      },
+      { status: 500 },
+    );
+  }
+});
+
+export const GET = withAuthAndRateLimit(async (req: NextRequest, authCtx, props) => {
+  const tenantId = authCtx.tenantId;
+
+  // Return protocol capabilities and active gateway information
+  const initInfo = await processMcpProtocolRequest(
+    { jsonrpc: '2.0', id: 'get-init', method: 'initialize' },
+    { tenantId },
+  );
+
+  return NextResponse.json(initInfo.result, {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-MCP-Protocol-Version': '2026-07-28',
+    },
+  });
+});
+
+export const DELETE = withAuthAndRateLimit(async (req: NextRequest, authCtx, props) => {
+  return NextResponse.json({
+    jsonrpc: '2.0',
+    id: 'del-1',
+    result: { message: 'تم إغلاق وتفريغ جلسة MCP عديمة الحالة بنجاح' },
+  });
+});

@@ -1,11 +1,20 @@
 'use server';
 
-import { doc, setDoc } from 'firebase/firestore';
-import { firestore } from '../lib/firebase';
 import { db } from '../lib/storage/db';
 import { Tenant, Collection, MCPServerConfig, SourceConnector, Document, DocumentChunk } from '../lib/types/omnirag';
 
 export async function seedNewTenant(tenantId: string, tenantName: string): Promise<void> {
+  // Check if tenant has documents already to make this call fully idempotent and safe
+  try {
+    const existingDocs = await db.getDocuments(tenantId);
+    if (existingDocs.length > 0) {
+      console.log(`[Seeding] Tenant ${tenantId} is already seeded. Skipping.`);
+      return;
+    }
+  } catch (err) {
+    console.error(`[Seeding] Error checking existing tenant documents:`, err);
+  }
+
   const colId = `col-general-${tenantId.slice(-6)}`;
   const mcpServerId = `mcp-core-${tenantId.slice(-6)}`;
   const sourceId = `src-guide-${tenantId.slice(-6)}`;
@@ -20,7 +29,7 @@ export async function seedNewTenant(tenantId: string, tenantName: string): Promi
     documentCount: 1,
     createdAt: new Date().toISOString(),
   };
-  await setDoc(doc(firestore, 'collections', colId), initialCollection);
+  await db.addCollection(initialCollection);
 
   const initialMcpServer: MCPServerConfig = {
     id: mcpServerId,
@@ -36,7 +45,23 @@ export async function seedNewTenant(tenantId: string, tenantName: string): Promi
     enabledTools: ['web_live_search', 'fetch_url_content', 'knowledge_ingest_document', 'external_postgres_query'],
     requireConfirmationTools: ['external_postgres_query'],
   };
-  await setDoc(doc(firestore, 'mcpServers', mcpServerId), initialMcpServer);
+  await db.addMcpServer(initialMcpServer);
+
+  const unstructuredMcpServer: MCPServerConfig = {
+    id: `mcp-unstructured-transform-${tenantId.slice(-6)}`,
+    tenantId,
+    name: 'Unstructured Transform',
+    description: 'Connect to the official Unstructured Transform MCP server for advanced document transform, clean and chunk pipelines.',
+    endpointUrl: 'https://mcp.transform.unstructured.io',
+    protocolVersion: '2026-07-28',
+    sandboxTier: 'T2_ELEVATED',
+    enabledTools: ['unstructured_transform_document', 'unstructured_chunk_document'],
+    requireConfirmationTools: [],
+    status: 'healthy',
+    latencyMs: 45,
+    lastChecked: new Date().toISOString(),
+  };
+  await db.addMcpServer(unstructuredMcpServer);
 
   const initialSource: SourceConnector = {
     id: sourceId,

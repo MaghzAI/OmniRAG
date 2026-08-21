@@ -1,54 +1,134 @@
+import { withAuthAndRateLimit } from '@/lib/api/withAuthAndRateLimit';
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { db } from '@/lib/storage/db';
-import { SourceConnector } from '@/lib/types/omnirag';
+import { SourceConnector, SourceType } from '@/lib/types/omnirag';
+import { getEnv } from '@/lib/env/runtimeEnv';
+import { encryptSourceConfig, redactSourceConfig } from '@/lib/storage/sourceConfigCrypto';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const tenantId = searchParams.get('tenantId') || 'tenant-acme-01';
-  const typeFilter = searchParams.get('type');
-  const statusFilter = searchParams.get('status');
+/**
+ * Source connector creation payload. `type` was previously accepted as any
+ * string, so a typo'd type produced a connector that no sync handler
+ * understands. It is now restricted to the SourceType union.
+ */
+const SOURCE_TYPES: SourceType[] = [
+  'file',
+  'url',
+  'rss',
+  'youtube',
+  'github',
+  'notion',
+  'gdrive',
+  'confluence',
+  'slack',
+  'email',
+  'database',
+  'api',
+];
 
-  let sources = await db.getSources(tenantId);
+const createSourceSchema = z.object({
+  name: z.string().trim().min(1, 'اسم الموصل مطلوب').max(300, 'اسم الموصل طويل جدا'),
+  type: z.enum(SOURCE_TYPES as [SourceType, ...SourceType[]], {
+    message: 'نوع الموصل غير مدعوم',
+  }),
+  config: z.record(z.string(), z.any()).default({}),
+  syncSchedule: z.string().trim().max(100).default('manual'),
+  collectionIds: z.array(z.string().min(1)).max(50).default([]),
+});
 
-  if (typeFilter) {
-    sources = sources.filter((s) => s.type === typeFilter);
-  }
+export const GET = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
 
-  if (statusFilter) {
-    sources = sources.filter((s) => s.status === statusFilter);
-  }
-
-  const syncLogs = await db.getSyncLogs(tenantId);
-  const mcpResources = await db.getMcpResources(tenantId);
-
-  return NextResponse.json({
-    tenantId,
-    totalSources: sources.length,
-    sources,
-    syncLogs,
-    mcpResources,
-  });
-}
-
-export async function POST(req: NextRequest) {
+  const tenantId = authCtx.tenantId;
   try {
-    const body = await req.json();
-    const { tenantId = 'tenant-acme-01', name, type, config = {}, syncSchedule = 'manual', collectionIds = [] } = body;
+    const { searchParams } = new URL(req.url);
+    const typeFilter = searchParams.get('type');
+    const statusFilter = searchParams.get('status');
 
-    if (!name || !type) {
-      return NextResponse.json({ error: 'Name and type are required fields' }, { status: 400 });
+    let sources = await db.getSources(tenantId);
+
+    if (typeFilter) {
+      sources = sources.filter((s) => s.type === typeFilter);
     }
 
+    if (statusFilter) {
+      sources = sources.filter((s) => s.status === statusFilter);
+    }
+
+    const syncLogs = await db.getSyncLogs(tenantId);
+    const mcpResources = await db.getMcpResources(tenantId);
+
+    // Never expose connector secrets in API responses.
+    const redactedSources = sources.map((s) => ({ ...s, config: redactSourceConfig(s.config) }));
+
+    return NextResponse.json({
+      tenantId,
+      totalSources: redactedSources.length,
+      sources: redactedSources,
+      syncLogs,
+      mcpResources,
+    });
+  } catch (error: any) {
+    console.error('API Error in sources GET:', error);
+    return NextResponse.json(
+      {
+        tenantId,
+        totalSources: 0,
+        sources: [],
+        syncLogs: [],
+        mcpResources: [],
+        error: 'فشل تحميل مصادر البيانات (Failed to load sources)',
+      },
+      { status: 500 },
+    );
+  }
+});
+
+export const POST = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
+  try {
+    const body = await req.json();
+    // Tenant identity is derived exclusively from the verified auth context
+    const tenantId = authCtx.tenantId;
+
+    const parsed = createSourceSchema.safeParse(body);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      return NextResponse.json(
+        { error: firstIssue?.message || 'بيانات الموصل غير صالحة', code: 'VALIDATION_ERROR' },
+        { status: 400 },
+      );
+    }
+    const { name, type, config, syncSchedule, collectionIds } = parsed.data;
+
     const id = `src-${type}-${Date.now().toString().slice(-6)}`;
+    // Encrypt any credential-bearing fields before persistence.
+    const encryptedConfig = encryptSourceConfig(config);
     const newSource: SourceConnector = {
       id,
       tenantId,
       name,
       type,
       status: 'healthy',
-      config,
+      config: encryptedConfig,
+      configEncrypted: true,
       syncSchedule,
       lastSyncAt: new Date().toISOString(),
       documentCount: 1,
@@ -59,24 +139,50 @@ export async function POST(req: NextRequest) {
     await db.addSource(newSource);
 
     // Also trigger initial ingestion for this source to populate documents
-    await db.syncSource(id, tenantId);
+    const syncResult = await db.syncSource(id, tenantId);
 
-    return NextResponse.json({
-      message: 'Source connector registered and indexed successfully',
-      source: await db.getSourceById(id, tenantId),
-    }, { status: 201 });
+    return NextResponse.json(
+      {
+        message: syncResult.success
+          ? 'Source connector registered and indexed successfully'
+          : 'Source connector registered, but initial indexing reported errors',
+        syncResult,
+        source: {
+          ...(await db.getSourceById(id, tenantId)),
+          config: redactSourceConfig((await db.getSourceById(id, tenantId))?.config || {}),
+        },
+      },
+      { status: 201 },
+    );
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || 'Failed to create source connector' }, { status: 500 });
+    console.error('API Error in sources POST:', error);
+    return NextResponse.json({ error: 'فشل إنشاء مصدر البيانات (Failed to create source connector)' }, { status: 500 });
   }
-}
+});
 
-export async function PUT(req: NextRequest) {
+export const PUT = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
   try {
     const body = await req.json();
-    const { id, tenantId = 'tenant-acme-01', ...updates } = body;
+    const { id, ...updates } = body;
+    const tenantId = authCtx.tenantId;
 
     if (!id) {
       return NextResponse.json({ error: 'Source ID is required' }, { status: 400 });
+    }
+
+    // Encrypt any credential-bearing fields supplied in the update payload.
+    if (updates.config && typeof updates.config === 'object') {
+      updates.config = encryptSourceConfig(updates.config);
+      updates.configEncrypted = true;
     }
 
     const updated = await db.updateSource(id, updates, tenantId);
@@ -84,16 +190,29 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Source not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ message: 'Source updated successfully', source: updated });
+    return NextResponse.json({
+      message: 'Source updated successfully',
+      source: { ...updated, config: redactSourceConfig(updated.config) },
+    });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || 'Failed to update source' }, { status: 500 });
+    console.error('API Error in sources PUT:', error);
+    return NextResponse.json({ error: 'فشل تحديث مصدر البيانات (Failed to update source)' }, { status: 500 });
   }
-}
+});
 
-export async function DELETE(req: NextRequest) {
+export const DELETE = withAuthAndRateLimit(async (req, authCtx, props) => {
+  // Load client-supplied dynamic environment keys from headers into process.env / global store
+  getEnv('GEMINI_API_KEY', req);
+  getEnv('UNSTRUCTURED_API_KEY', req);
+  getEnv('MISTRAL_API_KEY', req);
+  getEnv('DATABASE_URL', req);
+  getEnv('POSTGRES_URL', req);
+  getEnv('QDRANT_URL', req);
+  getEnv('QDRANT_API_KEY', req);
+
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
-  const tenantId = searchParams.get('tenantId') || 'tenant-acme-01';
+  const tenantId = authCtx.tenantId;
   const purgeDocs = searchParams.get('purgeDocs') !== 'false';
 
   if (!id) {
@@ -103,4 +222,4 @@ export async function DELETE(req: NextRequest) {
   await db.deleteSource(id, tenantId, purgeDocs);
 
   return NextResponse.json({ message: 'Source connector removed and associated data purged', id });
-}
+});
